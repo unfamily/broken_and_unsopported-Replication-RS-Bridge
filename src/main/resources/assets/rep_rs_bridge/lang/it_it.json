@@ -1,0 +1,11 @@
+{
+    "item.rep_rs_bridge.earth": "Materia Terrena",
+    "item.rep_rs_bridge.nether": "Materia Infernale",
+    "item.rep_rs_bridge.organic": "Materia Organica",
+    "item.rep_rs_bridge.ender": "Materia dell'End",
+    "item.rep_rs_bridge.metallic": "Materia Metallica",
+    "item.rep_rs_bridge.precious": "Materia Preziosa",
+    "item.rep_rs_bridge.living": "Materia Vivente",
+    "item.rep_rs_bridge.quantum": "Materia Quantica",
+    "block.rep_rs_bridge.rep_rs_bridge": "Ponte RS-Replication"
+} 

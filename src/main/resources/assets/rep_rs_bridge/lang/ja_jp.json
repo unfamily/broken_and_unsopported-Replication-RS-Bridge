@@ -1,0 +1,11 @@
+{
+    "item.rep_rs_bridge.earth": "アースマター",    
+    "item.rep_rs_bridge.nether": "ネザーマター",
+    "item.rep_rs_bridge.organic": "オーガニックマター",
+    "item.rep_rs_bridge.ender": "エンダーマター",
+    "item.rep_rs_bridge.metallic": "メタリックマター",
+    "item.rep_rs_bridge.precious": "プレシャスマター",
+    "item.rep_rs_bridge.living": "リビングマター",
+    "item.rep_rs_bridge.quantum": "クァンタムマター",
+    "block.rep_rs_bridge.rep_rs_bridge": "RS-Replication 統合機"
+} 

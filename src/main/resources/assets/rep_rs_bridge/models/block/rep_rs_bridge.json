@@ -1,0 +1,6 @@
+{
+  "parent": "block/cube_all",
+  "textures": {
+    "all": "rep_rs_bridge:block/bridge"
+  }
+} 
