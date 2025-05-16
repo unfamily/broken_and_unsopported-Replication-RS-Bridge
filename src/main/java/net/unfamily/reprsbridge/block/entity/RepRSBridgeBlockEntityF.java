@@ -7,6 +7,7 @@ import com.refinedmods.refinedstorage.api.resource.ResourceAmount;
 import com.refinedmods.refinedstorage.api.resource.ResourceKey;
 import com.refinedmods.refinedstorage.common.Platform;
 import com.refinedmods.refinedstorage.common.api.RefinedStorageApi;
+import com.refinedmods.refinedstorage.common.api.support.network.InWorldNetworkNodeContainer;
 import com.refinedmods.refinedstorage.common.api.support.resource.PlatformResourceKey;
 import com.refinedmods.refinedstorage.common.api.support.resource.ResourceContainer;
 import com.refinedmods.refinedstorage.common.content.BlockEntities;
@@ -31,6 +32,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.AbstractContainerMenu;
@@ -76,10 +78,37 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
      */
     public RepRSBridgeBlockEntityF(BlockPos pos, BlockState state) {
         super(
-            BlockEntities.INSTANCE.getInterface(),
+            ModBlockEntities.REPRSBRIDGE_F_BE.get(),
             pos,
             state,
             new BridgeNetworkNode(Platform.INSTANCE.getConfig().getInterface().getEnergyUsage())
+        );
+        
+        // Il nodo viene registrato automaticamente dal sistema di Refined Storage
+        // attraverso la classe AbstractBaseNetworkNodeContainerBlockEntity
+        LOGGER.debug("Nodo Refined Storage creato alla posizione {}", pos);
+    }
+    
+    /**
+     * Sovrascriviamo questo metodo per utilizzare la nostra strategia di connessione personalizzata
+     */
+    @Override
+    protected InWorldNetworkNodeContainer createMainContainer(BridgeNetworkNode networkNode) {
+        // Utilizziamo la nostra strategia di connessione personalizzata
+        // che permette la connessione con i cavi di Refined Storage
+        BridgeConnectionStrategy connectionStrategy = new BridgeConnectionStrategy(this::getBlockState, getBlockPos());
+        
+        // Forniamo l'accesso al level per la strategia di connessione "through"
+        connectionStrategy.setLevelSupplier(() -> this.level);
+        
+        // Log per debug
+        LOGGER.debug("Creata strategia di connessione personalizzata per il nodo alla posizione {}", getBlockPos());
+        
+        return new BridgeNetworkNodeContainer(
+            this,
+            networkNode,
+            "main",
+            connectionStrategy
         );
     }
     
@@ -88,6 +117,16 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
      */
     public void setMainEntity(RepRSBridgeBlockEntityP mainEntity) {
         this.mainEntity = mainEntity;
+        
+        // Quando impostiamo l'entità principale, notifichiamo anche lo stato della rete
+        Network network = mainNetworkNode.getNetwork();
+        if (mainEntity != null && network != null) {
+            mainEntity.onRefinedStorageNetworkChanged(true, network);
+            LOGGER.debug("Entità principale collegata e notificata dello stato della rete");
+        }
+        
+        // Marca come modificato per assicurarsi che il mondo salvi il cambiamento
+        setChanged();
     }
 
     /**
@@ -95,6 +134,14 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
      */
     public RepRSBridgeBlockEntityP getMainEntity() {
         return mainEntity;
+    }
+    
+    /**
+     * Restituisce il nodo di rete per la capability
+     */
+    public NetworkNode getNode() {
+        // Accediamo direttamente al campo mainNetworkNode ereditato dalla classe AbstractNetworkNodeContainerBlockEntity
+        return this.mainNetworkNode;
     }
     
     /**
@@ -109,6 +156,12 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
             if (mainEntity != null) {
                 mainEntity.onRefinedStorageNetworkChanged(false, null);
             }
+            
+            // La disconnessione dalla rete avviene automaticamente quando il blocco viene rimosso
+            // grazie alla classe AbstractBaseNetworkNodeContainerBlockEntity
+            
+            // Marca come modificato per assicurarsi che il mondo salvi il cambiamento
+            setChanged();
         }
     }
     
@@ -174,5 +227,96 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
     public NonNullList<ItemStack> getDrops() {
         // Restituisce gli oggetti da droppare quando il blocco viene distrutto
         return NonNullList.create();
+    }
+    
+    /**
+     * Override del metodo setChanged per gestire la sincronizzazione della rete
+     */
+    @Override
+    public void setChanged() {
+        super.setChanged();
+        
+        // Quando l'entità viene modificata, verifica lo stato della connessione
+        if (level != null && !level.isClientSide()) {
+            // Forza un aggiornamento esplicito del nodo di rete
+            LOGGER.debug("Bridge: Aggiornamento dell'entità RS, verifico lo stato della rete");
+            
+            // Se il nodo è null o non è connesso, forza la riconnessione
+            Network network = mainNetworkNode.getNetwork();
+            
+            if (network == null && level.hasNeighborSignal(getBlockPos())) {
+                // Il nodo non è connesso e c'è un segnale di redstone nelle vicinanze,
+                // potrebbe essere necessario riconnettere il nodo
+                LOGGER.debug("Bridge: Il nodo non è connesso, forzo una riconnessione");
+                
+                // Forza un aggiornamento del blocco per ricreare il nodo
+                level.sendBlockUpdated(getBlockPos(), getBlockState(), getBlockState(), 3);
+            }
+            
+            // Se siamo connessi a una rete, notifica l'entità principale
+            if (mainEntity != null && network != null) {
+                mainEntity.onRefinedStorageNetworkChanged(true, network);
+                LOGGER.debug("Bridge: Entità principale notificata dello stato della rete: connessa");
+            } else if (mainEntity != null) {
+                mainEntity.onRefinedStorageNetworkChanged(false, null);
+                LOGGER.debug("Bridge: Entità principale notificata dello stato della rete: disconnessa");
+            }
+        }
+    }
+    
+    /**
+     * Override del metodo onLoad per gestire la sincronizzazione della rete al caricamento
+     */
+    @Override
+    public void onLoad() {
+        super.onLoad();
+        
+        if (level != null && !level.isClientSide()) {
+            LOGGER.debug("Bridge RS: onLoad chiamato alla posizione {}", worldPosition);
+            
+            // Forza un aggiornamento di tutti i blocchi adiacenti
+            for (Direction direction : Direction.values()) {
+                BlockPos neighborPos = worldPosition.relative(direction);
+                BlockState neighborState = level.getBlockState(neighborPos);
+                
+                // Se il blocco adiacente è un cavo RS, forza un aggiornamento
+                if (isRefinedStorageCable(neighborState)) {
+                    LOGGER.debug("Bridge RS: Forzo aggiornamento blocco RS a {}", neighborPos);
+                    level.neighborChanged(neighborPos, getBlockState().getBlock(), worldPosition);
+                }
+            }
+            
+            // Forza un setChanged per aggiornare lo stato della rete
+            setChanged();
+            
+            // Schedule a delayed update to ensure network merging
+            if (level instanceof ServerLevel serverLevel) {
+                serverLevel.getServer().tell(new net.minecraft.server.TickTask(20, () -> {
+                    // Force network recalculation after delay
+                    LOGGER.debug("Bridge RS: Forzo ricalcolo rete dopo delay per {}", worldPosition);
+                    if (mainNetworkNode != null) {
+                        setChanged();
+                    }
+                    
+                    // Force block update to notify neighbors
+                    level.sendBlockUpdated(worldPosition, getBlockState(), getBlockState(), 3);
+                    
+                    // Notify all adjacent blocks again
+                    for (Direction direction : Direction.values()) {
+                        BlockPos neighborPos = worldPosition.relative(direction);
+                        level.neighborChanged(neighborPos, getBlockState().getBlock(), worldPosition);
+                    }
+                }));
+            }
+        }
+    }
+    
+    /**
+     * Verifica se un BlockState appartiene a un cavo Refined Storage
+     */
+    private boolean isRefinedStorageCable(BlockState state) {
+        String blockClass = state.getBlock().getClass().getName().toLowerCase();
+        return blockClass.contains("refinedstorage") && 
+               (blockClass.contains("cable") || blockClass.equals("cableblock"));
     }
 } 

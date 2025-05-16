@@ -17,6 +17,7 @@ import java.util.function.ToLongFunction;
 import javax.annotation.Nullable;
 
 public class BridgeNetworkNode extends AbstractNetworkNode {
+    private static final String NODE_ID = "bridge";
     private long energyUsage;
 
     private final Actor actor = new NetworkNodeActor(this);
@@ -28,6 +29,7 @@ public class BridgeNetworkNode extends AbstractNetworkNode {
     private OnMissingResources onMissingResources = OnMissingResources.EMPTY;
 
     public BridgeNetworkNode(final long energyUsage) {
+        super();
         this.energyUsage = energyUsage;
     }
 

@@ -1,6 +1,62 @@
 {
-  "variants": {
-    "connected=false": { "model": "rep_rs_bridge:block/rep_rs_bridge" },
-    "connected=true": { "model": "rep_rs_bridge:block/rep_rs_bridge" }
-  }
+  "multipart": [
+    {
+      "apply": { 
+        "model": "rep_rs_bridge:block/rep_rs_bridge" 
+      }
+    },
+    {
+      "apply": { 
+        "model": "rep_rs_bridge:block/bridge_cable" 
+      },
+      "when": { 
+        "c_north": "true" 
+      }
+    },
+    {
+      "apply": { 
+        "model": "rep_rs_bridge:block/bridge_cable", 
+        "y": 180 
+      },
+      "when": { 
+        "c_south": "true" 
+      }
+    },
+    {
+      "apply": { 
+        "model": "rep_rs_bridge:block/bridge_cable", 
+        "y": 90 
+      },
+      "when": { 
+        "c_east": "true" 
+      }
+    },
+    {
+      "apply": { 
+        "model": "rep_rs_bridge:block/bridge_cable", 
+        "y": 270 
+      },
+      "when": { 
+        "c_west": "true" 
+      }
+    },
+    {
+      "apply": { 
+        "model": "rep_rs_bridge:block/bridge_cable", 
+        "x": 270 
+      },
+      "when": { 
+        "c_up": "true" 
+      }
+    },
+    {
+      "apply": { 
+        "model": "rep_rs_bridge:block/bridge_cable", 
+        "x": 90 
+      },
+      "when": { 
+        "c_down": "true" 
+      }
+    }
+  ]
 } 

@@ -150,13 +150,23 @@ public class RepRSBridge
      * Register the mod namespace in the list of allowed namespaces for Replication cables
      */
     private void registerWithReplicationMod() {
-        // LOGGER.info("Registering RepRSBridge with Replication mod");
+        LOGGER.info("Registering RepRSBridge with Replication mod");
 
         // Add the mod namespace to the list of allowed namespaces
-        MatterPipeBlock.ALLOWED_CONNECTION_BLOCKS.add(block ->
+        MatterPipeBlock.ALLOWED_CONNECTION_BLOCKS.add(block -> 
             block.getClass().getName().contains(MOD_ID)
         );
+        
+        // Aggiungi un predicato specifico per il nostro blocco bridge
+        MatterPipeBlock.ALLOWED_CONNECTION_BLOCKS.add(block ->
+            block instanceof net.unfamily.reprsbridge.block.custom.RepRSBridgeBl
+        );
+        
+        // Aggiungi un predicato basato sul nome del blocco registrato
+        MatterPipeBlock.ALLOWED_CONNECTION_BLOCKS.add(block ->
+            block == ModBlocks.REPRSBRIDGE.get()
+        );
 
-        // LOGGER.info("Successfully registered with Replication mod");
+        LOGGER.info("Successfully registered with Replication mod");
     }
 }

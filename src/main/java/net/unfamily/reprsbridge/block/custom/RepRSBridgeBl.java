@@ -28,7 +28,10 @@ import org.slf4j.Logger;
 import net.minecraft.world.entity.player.Player;
 import net.unfamily.reprsbridge.block.entity.ModBlockEntities;
 import org.jetbrains.annotations.Nullable;
-
+import net.minecraft.world.item.context.BlockPlaceContext;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.RandomSource;
+import net.minecraft.server.TickTask;
 
 public class RepRSBridgeBl extends BasicTileBlock<RepRSBridgeBlockEntityP> implements INetworkDirectionalConnection, EntityBlock {
     public static final VoxelShape SHAPE = box(0, 0, 0, 16, 16, 16);
@@ -38,18 +41,28 @@ public class RepRSBridgeBl extends BasicTileBlock<RepRSBridgeBlockEntityP> imple
 
     // Add a property to display the connection status
     public static final BooleanProperty CONNECTED = BooleanProperty.create("connected");
+    // Add a property for Refined Storage activity state (like in InterfaceBlock)
+    public static final BooleanProperty ACTIVE = BooleanProperty.create("active");
+    
+    // Proprietà per le connessioni direzionali
+    public static final BooleanProperty C_NORTH = BooleanProperty.create("c_north");
+    public static final BooleanProperty C_SOUTH = BooleanProperty.create("c_south");
+    public static final BooleanProperty C_EAST = BooleanProperty.create("c_east");
+    public static final BooleanProperty C_WEST = BooleanProperty.create("c_west");
+    public static final BooleanProperty C_UP = BooleanProperty.create("c_up");
+    public static final BooleanProperty C_DOWN = BooleanProperty.create("c_down");
 
     public RepRSBridgeBl(Properties properties) {
         super(properties, RepRSBridgeBlockEntityP.class);
-        // Set the default state with connection to false
-        registerDefaultState(this.getStateDefinition().any().setValue(CONNECTED, false));
+        // Set the default state with connection to false and active to false
+      
         
         // Register the block as connectable with Replication pipes
         // (Added in case the static module in ModBlocks is not executed in time)
         registerWithReplicationMod();
     }
     
-    /**
+    /**s
      * Register this block as connectable by Replication pipes
      */
     private void registerWithReplicationMod() {
@@ -71,6 +84,13 @@ public class RepRSBridgeBl extends BasicTileBlock<RepRSBridgeBlockEntityP> imple
     protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> builder) {
         super.createBlockStateDefinition(builder);
         builder.add(CONNECTED);
+        builder.add(ACTIVE);
+        builder.add(C_NORTH);
+        builder.add(C_SOUTH);
+        builder.add(C_EAST);
+        builder.add(C_WEST);
+        builder.add(C_UP);
+        builder.add(C_DOWN);
     }
 
     @Override
@@ -98,109 +118,242 @@ public class RepRSBridgeBl extends BasicTileBlock<RepRSBridgeBlockEntityP> imple
     @Nullable
     @Override
     public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
-        // Crea entrambe le block entity
-        RepRSBridgeBlockEntityP mainEntity = new RepRSBridgeBlockEntityP(pos, state);
-        RepRSBridgeBlockEntityF rsEntity = new RepRSBridgeBlockEntityF(pos, state);
-        
-        // Collega le due entità
-        rsEntity.setMainEntity(mainEntity);
-        
-        // Restituisci l'entità principale (Replication)
-        return mainEntity;
+        // Crea l'entità principale (Replication)
+        return new RepRSBridgeBlockEntityP(pos, state);
     }
     
+    /**
+     * Questo metodo viene chiamato quando il blocco viene posizionato nel mondo
+     * È il momento ideale per inizializzare le BlockEntity
+     */
+    @Override
+    public void setPlacedBy(Level level, BlockPos pos, BlockState state, @Nullable net.minecraft.world.entity.LivingEntity entity, net.minecraft.world.item.ItemStack stack) {
+        super.setPlacedBy(level, pos, state, entity, stack);
+    }
+    
+    /**
+     * Crea uno stato del blocco con i valori di connessione corretti
+     */
+    private BlockState createState(Level world, BlockPos pos, BlockState curr) {
+        // Inizia con lo stato predefinito
+        BlockState state = this.defaultBlockState();
+        
+        // Verifica le connessioni per ogni direzione
+        for (Direction dir : Direction.values()) {
+            // Ottieni la proprietà per questa direzione
+            BooleanProperty dirProperty = getDirectionalProperty(dir);
+            
+            // Verifica se c'è un cavo RS in questa direzione
+            boolean isConnected = isRefStorageCableInDirection(world, pos, dir);
+            
+            // Imposta la proprietà di connessione
+            if (dirProperty != null) {
+                state = state.setValue(dirProperty, isConnected);
+            }
+        }
+        
+        // Mantieni le proprietà connected e active dallo stato corrente, se disponibili
+        if (curr != null && curr.getBlock() instanceof RepRSBridgeBl) {
+            state = state.setValue(CONNECTED, curr.getValue(CONNECTED))
+                         .setValue(ACTIVE, curr.getValue(ACTIVE));
+        }
+        
+        return state;
+    }
+    
+    /**
+     * Verifica se c'è un cavo Refined Storage nella direzione specificata
+     */
+    private boolean isRefStorageCableInDirection(Level world, BlockPos pos, Direction dir) {
+        // Ottieni la posizione del blocco adiacente
+        BlockPos neighborPos = pos.relative(dir);
+        
+        // Ottieni lo stato del blocco adiacente
+        BlockState neighborState = world.getBlockState(neighborPos);
+        
+        // Verifica se è un cavo Refined Storage
+        return isRefinedStorageCable(neighborState);
+    }
+    
+    /**
+     * Verifica se un BlockState appartiene a un cavo Refined Storage
+     */
+    private boolean isRefinedStorageCable(BlockState state) {
+        String blockClassName = state.getBlock().getClass().getSimpleName().toLowerCase();
+        String blockFullName = state.getBlock().getClass().getName().toLowerCase();
+        
+        // Controllo specifico per i cavi Refined Storage
+        boolean isRSCable = blockFullName.contains("refinedstorage") && 
+                           (blockClassName.contains("cable") || 
+                            blockClassName.equals("cableblock"));
+        
+        return isRSCable;
+    }
+
+    /**
+     * Ottiene la proprietà booleana corrispondente a una direzione
+     */
+    private BooleanProperty getDirectionalProperty(Direction direction) {
+        return switch (direction) {
+            case NORTH -> C_NORTH;
+            case SOUTH -> C_SOUTH;
+            case EAST -> C_EAST;
+            case WEST -> C_WEST;
+            case UP -> C_UP;
+            case DOWN -> C_DOWN;
+        };
+    }
+    
+    /**
+     * Restituisce lo stato appropriato quando il blocco viene piazzato
+     */
     @Nullable
     @Override
-    public <T extends BlockEntity> BlockEntityTicker<T> getTicker(Level level, BlockState state, BlockEntityType<T> type) {
-        return type == ModBlockEntities.REPRSBRIDGE_P_BE.get() ? 
-            (lvl, pos, st, be) -> ((RepRSBridgeBlockEntityP) be).serverTick(lvl, pos, st, (RepRSBridgeBlockEntityP) be) : null;
+    public BlockState getStateForPlacement(BlockPlaceContext context) {
+        return this.createState(context.getLevel(), context.getClickedPos(), this.defaultBlockState());
     }
     
+    /**
+     * Questo metodo viene chiamato quando un blocco vicino cambia
+     */
     @Override
-    public void setPlacedBy(Level level, BlockPos pos, BlockState state, @org.jetbrains.annotations.Nullable net.minecraft.world.entity.LivingEntity entity, net.minecraft.world.item.ItemStack stack) {
-        super.setPlacedBy(level, pos, state, entity, stack);
+    public void neighborChanged(BlockState state, Level worldIn, BlockPos pos, Block blockIn, BlockPos fromPos, boolean isMoving) {
+        super.neighborChanged(state, worldIn, pos, blockIn, fromPos, isMoving);
         
-        // Force an update to neighboring blocks when the bridge is placed
-        if (!level.isClientSide()) {
-            // Initialize the BlockEntity immediately
-            if (level.getBlockEntity(pos) instanceof RepRSBridgeBlockEntityP blockEntity) {
-                // Initialize the node
-                blockEntity.handleNeighborChanged(pos);
+        // Verifica se il mondo è remoto
+        if (worldIn.isClientSide()) {
+            return;
+        }
+        
+        // Crea un nuovo stato basato sulle connessioni attuali
+        BlockState newState = this.createState(worldIn, pos, state);
+        
+        // Se lo stato è cambiato, aggiorna il blocco
+        if (newState != state) {
+            worldIn.setBlockAndUpdate(pos, newState);
+        }
+        
+        // Aggiorna la BlockEntity
+        if (!worldIn.isClientSide() && worldIn.getBlockEntity(pos) instanceof RepRSBridgeBlockEntityP mainEntity) {
+            mainEntity.handleNeighborChanged(fromPos);
+            
+            // Riconnessione dell'entità Refined Storage
+            // Prima ottieni l'attuale entità RS
+            RepRSBridgeBlockEntityF currentRsEntity = mainEntity.getRefinedStorageEntity();
+            
+            // Cancella la vecchia entità RS se esiste
+            if (currentRsEntity != null) {
+                // Aggiungo un delay prima della disconnessione per dare tempo alla rete di stabilizzarsi
+                LOGGER.debug("Attendo prima di riconnettere l'entità Refined Storage alla posizione {}", pos);
+                
+                // Utilizzo un task schedulato invece di una disconnessione immediata
+                if (worldIn instanceof ServerLevel serverLevel) {
+                    serverLevel.getServer().tell(new TickTask(20, () -> {
+                        // Disconnetti dopo il delay
+                        currentRsEntity.disconnectFromNetwork();
+                        
+                        //Ricreo l'entità dopo la disconnessione
+                        RepRSBridgeBlockEntityF newRsEntity = new RepRSBridgeBlockEntityF(pos, state);
+                        
+                        // Collega le due entità
+                        newRsEntity.setMainEntity(mainEntity);
+                        mainEntity.setRefinedStorageEntity(newRsEntity);
+                        
+                        // Registra l'entità RS nel mondo
+                        LOGGER.debug("Ricreo l'entità Refined Storage alla posizione {} dopo il delay", pos);
+                        serverLevel.setBlockEntity(newRsEntity);
+                        
+                        // Forza un aggiornamento del blocco
+                        serverLevel.sendBlockUpdated(pos, state, state, 3);
+                    }));
+                }
             }
             
-            // Notify neighboring blocks
-            updateNeighbors(level, pos, state);
+            // Aggiorna lo stato connected e active
+            boolean isConnected = mainEntity.isActive() && mainEntity.getNetwork() != null;
+            boolean isActive = isConnected;
+            
+            if (newState.getValue(CONNECTED) != isConnected || newState.getValue(ACTIVE) != isActive) {
+                newState = newState
+                    .setValue(CONNECTED, isConnected)
+                    .setValue(ACTIVE, isActive);
+                
+                worldIn.setBlockAndUpdate(pos, newState);
+            }
         }
     }
     
     /**
-     * Useful method to update neighboring blocks
+     * Implementazione alternativa del pattern multi-BlockEntity
+     * Questo metodo crea esplicitamente la seconda BlockEntity quando necessario
      */
-    private void updateNeighbors(Level level, BlockPos pos, BlockState state) {
-        // Update the block itself
-        level.sendBlockUpdated(pos, state, state, 3);
+    @Override
+    public void onPlace(BlockState state, Level level, BlockPos pos, BlockState oldState, boolean isMoving) {
+        super.onPlace(state, level, pos, oldState, isMoving);
         
-        // Update all adjacent blocks to ensure they detect the connection
-        for (Direction direction : Direction.values()) {
-            BlockPos neighborPos = pos.relative(direction);
-            BlockState neighborState = level.getBlockState(neighborPos);
-            
-            // Notify the neighboring block of the change
-            level.neighborChanged(neighborPos, state.getBlock(), pos);
-            
-            // If the neighboring block is a Replication network pipe, force it to update
-            if (neighborState.getBlock() instanceof MatterPipeBlock) {
-                // Update the visual state of the pipe
-                level.sendBlockUpdated(neighborPos, neighborState, neighborState, 3);
+        if (!level.isClientSide() && !isMoving) {
+            // Ottieni l'entità principale
+            BlockEntity mainEntity = level.getBlockEntity(pos);
+            if (mainEntity instanceof RepRSBridgeBlockEntityP primaryEntity) {
+                // Crea e registra esplicitamente l'entità RS solo quando necessario
+                RepRSBridgeBlockEntityF rsEntity = new RepRSBridgeBlockEntityF(pos, state);
                 
-                // Force a more aggressive recalculation of the connection
-                if (neighborState.hasProperty(MatterPipeBlock.DIRECTIONS.get(direction.getOpposite()))) {
-                    // This forces a recalculation both via block event and via state change
-                    level.setBlock(neighborPos, neighborState.setValue(
-                            MatterPipeBlock.DIRECTIONS.get(direction.getOpposite()), 
-                            true), 3);
-                }
+                // Collega le due entità
+                rsEntity.setMainEntity(primaryEntity);
+                primaryEntity.setRefinedStorageEntity(rsEntity);
+                
+                // Registra l'entità RS nel mondo (aggiungendo un nuovo tipo di BlockEntity nella stessa posizione)
+                LOGGER.debug("Registrazione esplicita della BlockEntity RS alla posizione {}", pos);
+                level.setBlockEntity(rsEntity);
             }
+            
+            // Aggiorna immediatamente lo stato del blocco
+            BlockState newState = this.createState(level, pos, state);
+            
+            if (newState != state) {
+                level.setBlockAndUpdate(pos, newState);
+            }
+            
+            // Schedula un tick per verificare eventuali cambiamenti
+            level.scheduleTick(pos, this, 5);
         }
     }
     
+    /**
+     * Gestisce i tick schedulati
+     */
     @Override
-    public void neighborChanged(BlockState state, Level level, BlockPos pos, net.minecraft.world.level.block.Block blockIn, BlockPos fromPos, boolean isMoving) {
-        super.neighborChanged(state, level, pos, blockIn, fromPos, isMoving);
+    public void tick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
+        super.tick(state, level, pos, random);
         
-        // If a neighboring block changes, inform the BlockEntity
-        if (!level.isClientSide()) {
-            // Check if the adjacent block is a Replication pipe
-            Direction directionToPipe = null;
-            for (Direction direction : Direction.values()) {
-                if (pos.relative(direction).equals(fromPos) && 
-                    level.getBlockState(fromPos).getBlock() instanceof MatterPipeBlock) {
-                    directionToPipe = direction;
-                    break;
-                }
+        // Verifica e aggiorna lo stato se necessario
+        BlockState newState = this.createState(level, pos, state);
+        
+        if (newState != state) {
+            level.setBlockAndUpdate(pos, newState);
+        }
+
+        // Assicuriamoci che l'entità RS esista e sia connessa
+        BlockEntity mainEntity = level.getBlockEntity(pos);
+        if (mainEntity instanceof RepRSBridgeBlockEntityP primaryEntity) {
+            // Verifica se l'entità RS esiste
+            RepRSBridgeBlockEntityF rsEntity = primaryEntity.getRefinedStorageEntity();
+            
+            if (rsEntity != null) {
+                // Se l'entità esiste, forza un aggiornamento periodicamente
+                rsEntity.setChanged();
             }
             
-            // Notifica entrambe le block entity dell'aggiornamento
-            BlockEntity blockEntity = level.getBlockEntity(pos);
-            if (blockEntity instanceof RepRSBridgeBlockEntityP mainEntity) {
-                // Notifica l'entità principale (Replication)
-                mainEntity.handleNeighborChanged(fromPos);
-                
-                // Aggiorna lo stato visivo del blocco
-                boolean isConnected = mainEntity.isActive() && mainEntity.getNetwork() != null;
-                if (state.getValue(CONNECTED) != isConnected) {
-                    level.setBlock(pos, state.setValue(CONNECTED, isConnected), 3);
-                }
-                
-                // Se è stata trovata una pipe adiacente, forza l'aggiornamento della pipe
-                if (directionToPipe != null) {
-                    BlockState pipeState = level.getBlockState(fromPos);
-                    if (pipeState.getBlock() instanceof MatterPipeBlock) {
-                        level.sendBlockUpdated(fromPos, pipeState, pipeState, 3);
-                    }
-                }
+            // Aggiorna lo stato connected e active
+            boolean isConnected = primaryEntity.isActive();
+            
+            if (state.getValue(CONNECTED) != isConnected) {
+                level.setBlockAndUpdate(pos, state.setValue(CONNECTED, isConnected).setValue(ACTIVE, isConnected));
             }
         }
+        
+        // Schedula un altro tick per verificare periodicamente
+        level.scheduleTick(pos, this, 20);
     }
     
     @Override
@@ -243,5 +396,46 @@ public class RepRSBridgeBl extends BasicTileBlock<RepRSBridgeBlockEntityP> imple
     @Override
     public boolean canHarvestBlock(BlockState state, BlockGetter level, BlockPos pos, Player player) {
         return true;
+    }
+    
+    
+    /**
+     * Forza un aggiornamento del renderer per questo blocco
+     */
+    private void forceRenderUpdate(Level level, BlockPos pos, BlockState state) {
+        if (level.isClientSide()) return;
+        
+        // Forza un aggiornamento esplicito del renderer con flag massimi
+        level.sendBlockUpdated(pos, state, state, 3);
+        
+        // Notifica i chunk adiacenti
+        level.updateNeighborsAt(pos, this);
+        
+        // Notifica il client di un cambiamento di stato
+        if (level instanceof ServerLevel serverLevel) {
+            serverLevel.getChunkSource().blockChanged(pos);
+        }
+    }
+
+    /**
+     * Questo metodo è chiamato per ottenere il ticker per la BlockEntity
+     */
+    @Nullable
+    @Override
+    public <T extends BlockEntity> BlockEntityTicker<T> getTicker(Level level, BlockState state, BlockEntityType<T> type) {
+        if (level.isClientSide()) {
+            return null;
+        }
+        
+        // Ticker per l'entità Replication
+        if (type == ModBlockEntities.REPRSBRIDGE_P_BE.get()) {
+            return (lvl, pos, blockState, blockEntity) -> {
+                if (blockEntity instanceof RepRSBridgeBlockEntityP entity) {
+                    entity.serverTick(lvl, pos, blockState, entity);
+                }
+            };
+        }
+        
+        return null;
     }
 }

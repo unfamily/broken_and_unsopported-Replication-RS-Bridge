@@ -140,6 +140,9 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
     private boolean connected = false;
     private boolean active = false;
     private Network rsNetwork;
+    
+    // Riferimento all'entità BlockEntity di Refined Storage
+    private RepRSBridgeBlockEntityF refinedStorageEntity;
 
     /**
      * Sets the world unloading state
@@ -350,32 +353,18 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
                 return;
             }
 
-            // Check if there is an RS controller in the network
-            boolean hasRSConnection = hasRSNetworkConnection();
-
-            // If there is an RS connection and the node is not created, initialize the node
-            if (hasRSConnection && !nodeCreated) {
-                try {
-                    // Debug log disabled for production
-                    // LOGGER.debug("Bridge: Initializing RS node from handleNeighborChanged");
-                    nodeCreated = true;
-
-                    // Notify adjacent blocks
-                    forceNeighborUpdates();
-
-                    // Update the connection state visually
-                    updateConnectedState();
-                }catch (Exception e) {
-                    LOGGER.error("Failed to initialize RS node: {}", e.getMessage());
-                    shouldReconnect = true;
-                }
+            // Forza un nuovo tentativo di connessione al network
+            LOGGER.debug("Bridge: Blocco vicino cambiato in posizione {}, aggiorno la connessione", fromPos);
+            
+            // Se abbiamo un'entità Refined Storage, assicuriamoci che sia connessa
+            if (refinedStorageEntity != null) {
+                // Notifica l'entità RS che potrebbe essere necessario riconnettersi
+                refinedStorageEntity.setChanged();
+                LOGGER.debug("Bridge: Notificata l'entità RS di aggiornare la connessione");
             }
-            // If the node exists, update only adjacent blocks
-            else {
-                forceNeighborUpdates();
-            }
-
-            // Update the visual state
+            
+            // Notifica gli adiacenti che ci siamo aggiornati
+            forceNeighborUpdates();
             updateConnectedState();
         }
     }
@@ -783,5 +772,20 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
         
         // Aggiorna lo stato visivo
         updateConnectedState();
+    }
+
+    /**
+     * Imposta l'entità BlockEntity di Refined Storage
+     */
+    public void setRefinedStorageEntity(RepRSBridgeBlockEntityF entity) {
+        this.refinedStorageEntity = entity;
+        LOGGER.debug("Impostata entità Refined Storage per l'entità principale");
+    }
+    
+    /**
+     * Ottiene l'entità BlockEntity di Refined Storage
+     */
+    public RepRSBridgeBlockEntityF getRefinedStorageEntity() {
+        return this.refinedStorageEntity;
     }
 }
