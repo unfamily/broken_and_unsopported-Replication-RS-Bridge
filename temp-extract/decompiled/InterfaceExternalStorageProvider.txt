@@ -1,0 +1,33 @@
+Classfile /home/unfamily/IdeaProjects/Replication-RS-Bridge/temp-extract/com/refinedmods/refinedstorage/api/network/impl/node/iface/externalstorage/InterfaceExternalStorageProvider.class
+  Last modified 6 apr 2025; size 482 bytes
+  SHA-256 checksum 391f5370487981b25424b52a2192db8bc49574c84d7230a44e66aff6aa9e9764
+  Compiled from "InterfaceExternalStorageProvider.java"
+public interface com.refinedmods.refinedstorage.api.network.impl.node.iface.externalstorage.InterfaceExternalStorageProvider extends com.refinedmods.refinedstorage.api.storage.external.ExternalStorageProvider
+  minor version: 0
+  major version: 65
+  flags: (0x0601) ACC_PUBLIC, ACC_INTERFACE, ACC_ABSTRACT
+  this_class: #1                          // com/refinedmods/refinedstorage/api/network/impl/node/iface/externalstorage/InterfaceExternalStorageProvider
+  super_class: #3                         // java/lang/Object
+  interfaces: 1, fields: 0, methods: 1, attributes: 1
+Constant pool:
+   #1 = Class              #2             // com/refinedmods/refinedstorage/api/network/impl/node/iface/externalstorage/InterfaceExternalStorageProvider
+   #2 = Utf8               com/refinedmods/refinedstorage/api/network/impl/node/iface/externalstorage/InterfaceExternalStorageProvider
+   #3 = Class              #4             // java/lang/Object
+   #4 = Utf8               java/lang/Object
+   #5 = Class              #6             // com/refinedmods/refinedstorage/api/storage/external/ExternalStorageProvider
+   #6 = Utf8               com/refinedmods/refinedstorage/api/storage/external/ExternalStorageProvider
+   #7 = Utf8               getInterface
+   #8 = Utf8               ()Lcom/refinedmods/refinedstorage/api/network/impl/node/iface/InterfaceNetworkNode;
+   #9 = Utf8               RuntimeVisibleAnnotations
+  #10 = Utf8               Ljavax/annotation/Nullable;
+  #11 = Utf8               SourceFile
+  #12 = Utf8               InterfaceExternalStorageProvider.java
+{
+  public abstract com.refinedmods.refinedstorage.api.network.impl.node.iface.InterfaceNetworkNode getInterface();
+    descriptor: ()Lcom/refinedmods/refinedstorage/api/network/impl/node/iface/InterfaceNetworkNode;
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+    RuntimeVisibleAnnotations:
+      0: #10()
+        javax.annotation.Nullable
+}
+SourceFile: "InterfaceExternalStorageProvider.java"

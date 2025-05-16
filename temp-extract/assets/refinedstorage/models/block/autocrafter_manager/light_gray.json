@@ -1,0 +1,13 @@
+{
+  "parent": "refinedstorage:block/emissive_north_cutout",
+  "textures": {
+    "cutout": "refinedstorage:block/autocrafter_manager/cutouts/light_gray",
+    "down": "refinedstorage:block/bottom",
+    "east": "refinedstorage:block/autocrafter_manager/right",
+    "north": "refinedstorage:block/autocrafter_manager/front",
+    "particle": "refinedstorage:block/autocrafter_manager/right",
+    "south": "refinedstorage:block/autocrafter_manager/back",
+    "up": "refinedstorage:block/autocrafter_manager/top",
+    "west": "refinedstorage:block/autocrafter_manager/left"
+  }
+}
