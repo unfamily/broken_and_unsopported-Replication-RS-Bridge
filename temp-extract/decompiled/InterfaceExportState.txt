@@ -1,0 +1,99 @@
+Classfile /home/unfamily/IdeaProjects/Replication-RS-Bridge/temp-extract/com/refinedmods/refinedstorage/api/network/impl/node/iface/InterfaceExportState.class
+  Last modified 6 apr 2025; size 1335 bytes
+  SHA-256 checksum 55ee69edfd4644a216f922bc256ce99e5c0ca52d43600adc83062acd0dca54db
+  Compiled from "InterfaceExportState.java"
+public interface com.refinedmods.refinedstorage.api.network.impl.node.iface.InterfaceExportState
+  minor version: 0
+  major version: 65
+  flags: (0x0601) ACC_PUBLIC, ACC_INTERFACE, ACC_ABSTRACT
+  this_class: #1                          // com/refinedmods/refinedstorage/api/network/impl/node/iface/InterfaceExportState
+  super_class: #3                         // java/lang/Object
+  interfaces: 0, fields: 0, methods: 12, attributes: 1
+Constant pool:
+   #1 = Class              #2             // com/refinedmods/refinedstorage/api/network/impl/node/iface/InterfaceExportState
+   #2 = Utf8               com/refinedmods/refinedstorage/api/network/impl/node/iface/InterfaceExportState
+   #3 = Class              #4             // java/lang/Object
+   #4 = Utf8               java/lang/Object
+   #5 = Utf8               getSlots
+   #6 = Utf8               ()I
+   #7 = Utf8               expandExportCandidates
+   #8 = Utf8               (Lcom/refinedmods/refinedstorage/api/storage/root/RootStorage;Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;)Ljava/util/Collection;
+   #9 = Utf8               Signature
+  #10 = Utf8               (Lcom/refinedmods/refinedstorage/api/storage/root/RootStorage;Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;)Ljava/util/Collection<Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;>;
+  #11 = Utf8               isExportedResourceValid
+  #12 = Utf8               (Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;)Z
+  #13 = Utf8               getRequestedResource
+  #14 = Utf8               (I)Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;
+  #15 = Utf8               RuntimeVisibleAnnotations
+  #16 = Utf8               Ljavax/annotation/Nullable;
+  #17 = Utf8               getRequestedAmount
+  #18 = Utf8               (I)J
+  #19 = Utf8               getExportedResource
+  #20 = Utf8               getExportedAmount
+  #21 = Utf8               setExportSlot
+  #22 = Utf8               (ILcom/refinedmods/refinedstorage/api/resource/ResourceKey;J)V
+  #23 = Utf8               shrinkExportedAmount
+  #24 = Utf8               (IJ)V
+  #25 = Utf8               growExportedAmount
+  #26 = Utf8               insert
+  #27 = Utf8               (Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;JLcom/refinedmods/refinedstorage/api/core/Action;)J
+  #28 = Utf8               extract
+  #29 = Utf8               SourceFile
+  #30 = Utf8               InterfaceExportState.java
+{
+  public abstract int getSlots();
+    descriptor: ()I
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+
+  public abstract java.util.Collection<com.refinedmods.refinedstorage.api.resource.ResourceKey> expandExportCandidates(com.refinedmods.refinedstorage.api.storage.root.RootStorage, com.refinedmods.refinedstorage.api.resource.ResourceKey);
+    descriptor: (Lcom/refinedmods/refinedstorage/api/storage/root/RootStorage;Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;)Ljava/util/Collection;
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+    Signature: #10                          // (Lcom/refinedmods/refinedstorage/api/storage/root/RootStorage;Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;)Ljava/util/Collection<Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;>;
+
+  public abstract boolean isExportedResourceValid(com.refinedmods.refinedstorage.api.resource.ResourceKey, com.refinedmods.refinedstorage.api.resource.ResourceKey);
+    descriptor: (Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;)Z
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+
+  public abstract com.refinedmods.refinedstorage.api.resource.ResourceKey getRequestedResource(int);
+    descriptor: (I)Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+    RuntimeVisibleAnnotations:
+      0: #16()
+        javax.annotation.Nullable
+
+  public abstract long getRequestedAmount(int);
+    descriptor: (I)J
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+
+  public abstract com.refinedmods.refinedstorage.api.resource.ResourceKey getExportedResource(int);
+    descriptor: (I)Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+    RuntimeVisibleAnnotations:
+      0: #16()
+        javax.annotation.Nullable
+
+  public abstract long getExportedAmount(int);
+    descriptor: (I)J
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+
+  public abstract void setExportSlot(int, com.refinedmods.refinedstorage.api.resource.ResourceKey, long);
+    descriptor: (ILcom/refinedmods/refinedstorage/api/resource/ResourceKey;J)V
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+
+  public abstract void shrinkExportedAmount(int, long);
+    descriptor: (IJ)V
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+
+  public abstract void growExportedAmount(int, long);
+    descriptor: (IJ)V
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+
+  public abstract long insert(com.refinedmods.refinedstorage.api.resource.ResourceKey, long, com.refinedmods.refinedstorage.api.core.Action);
+    descriptor: (Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;JLcom/refinedmods/refinedstorage/api/core/Action;)J
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+
+  public abstract long extract(com.refinedmods.refinedstorage.api.resource.ResourceKey, long, com.refinedmods.refinedstorage.api.core.Action);
+    descriptor: (Lcom/refinedmods/refinedstorage/api/resource/ResourceKey;JLcom/refinedmods/refinedstorage/api/core/Action;)J
+    flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+}
+SourceFile: "InterfaceExportState.java"

@@ -1,0 +1,17 @@
+{
+  "parent": "refinedstorage:block/emissive_sides_cutout",
+  "textures": {
+    "cutout_east": "refinedstorage:block/autocrafter/cutouts/side/magenta",
+    "cutout_north": "refinedstorage:block/autocrafter/cutouts/side/magenta",
+    "cutout_south": "refinedstorage:block/autocrafter/cutouts/side/magenta",
+    "cutout_up": "refinedstorage:block/autocrafter/cutouts/top/magenta",
+    "cutout_west": "refinedstorage:block/autocrafter/cutouts/side/magenta",
+    "down": "refinedstorage:block/bottom",
+    "east": "refinedstorage:block/autocrafter/side",
+    "north": "refinedstorage:block/autocrafter/side",
+    "particle": "refinedstorage:block/autocrafter/side",
+    "south": "refinedstorage:block/autocrafter/side",
+    "up": "refinedstorage:block/autocrafter/top",
+    "west": "refinedstorage:block/autocrafter/side"
+  }
+}

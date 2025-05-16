@@ -1,0 +1,20 @@
+{
+  "values": [
+    "refinedstorage:white_autocrafter_manager",
+    "refinedstorage:orange_autocrafter_manager",
+    "refinedstorage:magenta_autocrafter_manager",
+    "refinedstorage:autocrafter_manager",
+    "refinedstorage:yellow_autocrafter_manager",
+    "refinedstorage:lime_autocrafter_manager",
+    "refinedstorage:pink_autocrafter_manager",
+    "refinedstorage:gray_autocrafter_manager",
+    "refinedstorage:light_gray_autocrafter_manager",
+    "refinedstorage:cyan_autocrafter_manager",
+    "refinedstorage:purple_autocrafter_manager",
+    "refinedstorage:blue_autocrafter_manager",
+    "refinedstorage:brown_autocrafter_manager",
+    "refinedstorage:green_autocrafter_manager",
+    "refinedstorage:red_autocrafter_manager",
+    "refinedstorage:black_autocrafter_manager"
+  ]
+}
