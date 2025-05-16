@@ -2,7 +2,8 @@ package net.unfamily.reprsbridge;
 
 import net.unfamily.reprsbridge.block.ModBlocks;
 import net.unfamily.reprsbridge.block.entity.ModBlockEntities;
-import net.unfamily.reprsbridge.block.entity.RepRSBridgeBlockEntity;
+import net.unfamily.reprsbridge.block.entity.RepRSBridgeBlockEntityP;
+import net.unfamily.reprsbridge.block.entity.RepRSBridgeBlockEntityF;
 import org.slf4j.Logger;
 
 import com.mojang.logging.LogUtils;
@@ -24,15 +25,8 @@ import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
 import net.neoforged.neoforge.event.server.ServerStartingEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.unfamily.reprsbridge.item.ModItems;
-import net.neoforged.neoforge.capabilities.BlockCapability;
 import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
-import com.refinedmods.refinedstorage.api.network.node.NetworkNode;
 import com.buuz135.replication.block.MatterPipeBlock;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
-import net.minecraft.world.level.Level;
-import javax.annotation.Nullable;
-import com.refinedmods.refinedstorage.api.network.Network;
 
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
@@ -43,11 +37,6 @@ public class RepRSBridge
     public static final String MOD_ID = "rep_rs_bridge";
     // Directly reference a slf4j logger
     private static final Logger LOGGER = LogUtils.getLogger();
-
-    // Define the capability for INetworkNode
-    private static final BlockCapability<NetworkNode, Void> NETWORK_NODE =
-        BlockCapability.createVoid(ResourceLocation.parse("refinedstorage:network_node"), NetworkNode.class);
-
 
     // The constructor for the mod class is the first code that is run when your mod is loaded.
     // FML will recognize some parameter types like IEventBus or ModContainer and pass them in automatically.
@@ -110,20 +99,7 @@ public class RepRSBridge
 
     // Register bridge capabilities
     private void registerCapabilities(RegisterCapabilitiesEvent event) {
-        // Register the NetworkNode capability for the bridge block
-        event.registerBlock(
-            NETWORK_NODE,
-            (level, pos, state, be, context) -> {
-                if (be instanceof RepRSBridgeBlockEntity bridge) {
-                    // Restituisce un adattatore che implementa NetworkNode
-                    return new NetworkNodeAdapter(bridge);
-                }
-                return null;
-            },
-            ModBlocks.REPRSBRIDGE.get()
-        );
-
-        // Registra le capabilities del bridge per il trasferimento di item
+        // Registra le capabilities del bridge per entrambe le entità
         RepRSBridgeCapabilities.register(event);
 
         // Log that capabilities have been registered
@@ -145,7 +121,7 @@ public class RepRSBridge
     public void onServerStarting(ServerStartingEvent event)
     {
         // LOGGER.info("RepRSBridge: Server starting");
-        RepRSBridgeBlockEntity.setWorldUnloading(false);
+        RepRSBridgeBlockEntityP.setWorldUnloading(false);
     }
 
     @SubscribeEvent
@@ -154,7 +130,7 @@ public class RepRSBridge
         LOGGER.info("RepRSBridge: Server stopping, notifying bridges to prepare for unload");
 
         // Set the static flag in the BlockEntity class
-        RepRSBridgeBlockEntity.setWorldUnloading(true);
+        RepRSBridgeBlockEntityP.setWorldUnloading(true);
 
         LOGGER.info("RepRSBridge: All bridges notified of world unload");
     }
@@ -182,27 +158,5 @@ public class RepRSBridge
         );
 
         // LOGGER.info("Successfully registered with Replication mod");
-    }
-
-    /**
-     * Classe adattatore che implementa l'interfaccia NetworkNode per il nostro bridge
-     * Questo evita la necessità di implementare direttamente NetworkNode nel BlockEntity
-     */
-    public static class NetworkNodeAdapter implements NetworkNode {
-        private final RepRSBridgeBlockEntity bridge;
-            
-        public NetworkNodeAdapter(RepRSBridgeBlockEntity bridge) {
-            this.bridge = bridge;
-        }
-            
-        @Override
-        public void setNetwork(@Nullable Network network) {
-            bridge.setRsNetwork(network);
-        }
-            
-        @Override
-        public Network getNetwork() {
-            return bridge.getRsNetwork();
-        }
     }
 }

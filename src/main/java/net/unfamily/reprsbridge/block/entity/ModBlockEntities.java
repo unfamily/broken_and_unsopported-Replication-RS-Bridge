@@ -13,9 +13,15 @@ public class ModBlockEntities {
     public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES =
             DeferredRegister.create(BuiltInRegistries.BLOCK_ENTITY_TYPE, RepRSBridge.MOD_ID);
 
-    public static final Supplier<BlockEntityType<RepRSBridgeBlockEntity>> REPRSBRIDGE_BE =
-            BLOCK_ENTITIES.register("bridge_be", () -> BlockEntityType.Builder.of(
-                    RepRSBridgeBlockEntity::new, ModBlocks.REPRSBRIDGE.get()).build(null));
+    // Block entity per Replication
+    public static final Supplier<BlockEntityType<RepRSBridgeBlockEntityP>> REPRSBRIDGE_P_BE =
+            BLOCK_ENTITIES.register("bridge_p_be", () -> BlockEntityType.Builder.of(
+                    RepRSBridgeBlockEntityP::new, ModBlocks.REPRSBRIDGE.get()).build(null));
+
+    // Block entity per Refined Storage
+    public static final Supplier<BlockEntityType<RepRSBridgeBlockEntityF>> REPRSBRIDGE_F_BE =
+            BLOCK_ENTITIES.register("bridge_f_be", () -> BlockEntityType.Builder.of(
+                    RepRSBridgeBlockEntityF::new, ModBlocks.REPRSBRIDGE.get()).build(null));
 
     public static void register(IEventBus eventBus) {
         BLOCK_ENTITIES.register(eventBus);
