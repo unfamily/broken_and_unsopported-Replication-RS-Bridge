@@ -24,6 +24,13 @@ import com.refinedmods.refinedstorage.common.support.resource.ResourceContainerI
 import com.refinedmods.refinedstorage.common.upgrade.UpgradeContainer;
 import com.refinedmods.refinedstorage.common.upgrade.UpgradeDestinations;
 import com.refinedmods.refinedstorage.common.util.ContainerUtil;
+import com.refinedmods.refinedstorage.api.storage.Storage;
+import com.refinedmods.refinedstorage.api.storage.StorageView;
+import com.refinedmods.refinedstorage.api.storage.root.RootStorage;
+import com.refinedmods.refinedstorage.api.storage.Actor;
+import com.refinedmods.refinedstorage.api.storage.StorageImpl;
+import com.refinedmods.refinedstorage.api.network.storage.StorageNetworkComponent;
+import com.refinedmods.refinedstorage.api.network.node.GraphNetworkComponent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
@@ -36,6 +43,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.AbstractContainerMenu;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -43,15 +51,27 @@ import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 import net.unfamily.reprsbridge.block.custom.RepRSBridgeBl;
 import net.unfamily.reprsbridge.block.ModBlocks;
+import net.unfamily.reprsbridge.RepRSBridge;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import com.mojang.logging.LogUtils;
+import com.buuz135.replication.network.MatterNetwork;
+import com.buuz135.replication.api.IMatterType;
+import net.unfamily.reprsbridge.util.ReplicationHelper;
+import net.unfamily.reprsbridge.item.ModItems;
+import net.minecraft.core.registries.BuiltInRegistries;
 
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
 import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.lang.reflect.Method;
 
 /**
  * BlockEntity dedicata per la connessione con la rete Refined Storage.
@@ -68,10 +88,30 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
     // Riferimento alla BlockEntity principale per la comunicazione
     private RepRSBridgeBlockEntityP mainEntity;
     
+    // Riferimento al MatterNetwork di Replication
+    private MatterNetwork matterNetwork;
+    
+    // Timestamp per la sincronizzazione delle reti
+    private long lastNetworkSyncTime = 0;
+    
     // Contenitori per risorse
     private final List<ResourceAmount> filterItems = new ArrayList<>();
     private final List<ResourceAmount> exportedItems = new ArrayList<>();
     private final List<ExportingIndicator> exportingIndicators = new ArrayList<>();
+    
+    // Storage virtuale per gli item simulati
+    private final Map<ResourceKey, Long> virtualItems = new HashMap<>();
+    private final VirtualStorage virtualStorage = new VirtualStorage();
+    
+    // Variabili statiche per gestire il salvataggio e lo scaricamento
+    private static boolean worldSaving = false;
+    private static boolean safeToUpdate = true;
+    
+    // Variabile statica per salvare lo stato dello storage tra le ricreazioni dell'entità
+    private static Map<BlockPos, Map<ResourceKey, Long>> savedVirtualItems = new HashMap<>();
+    
+    // Thread di monitoraggio per la rimozione di item
+    private Thread monitorThread = null;
     
     /**
      * Costruttore per RepRSBridgeBlockEntityF
@@ -89,6 +129,14 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
         LOGGER.debug("Nodo Refined Storage creato alla posizione {}", pos);
     }
     
+    public void removeNetwork()
+    {
+       disconnectFromNetwork();
+       mainNetworkNode.setNetwork(null);
+       mainEntity = null;
+       matterNetwork = null;
+    }
+
     /**
      * Sovrascriviamo questo metodo per utilizzare la nostra strategia di connessione personalizzata
      */
@@ -145,33 +193,205 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
     }
     
     /**
+     * Imposta lo stato di salvataggio del mondo
+     * Questo metodo dovrebbe essere chiamato dai listener degli eventi del server
+     */
+    public static void setWorldSaving(boolean saving) {
+        worldSaving = saving;
+        safeToUpdate = !saving;
+        LOGGER.info("Bridge RS: Impostato stato di salvataggio del mondo a {}", saving);
+    }
+    
+    /**
      * Disconnette questa entità dalla rete
      */
     public void disconnectFromNetwork() {
         if (level != null && !level.isClientSide()) {
-            active = false;
-            connected = false;
+            try {
+                // Imposta un flag per evitare ulteriori aggiornamenti
+                safeToUpdate = false;
+                
+                LOGGER.debug("Disconnessione dell'entità RS alla posizione {}", worldPosition);
+                
+                // Verifica se siamo effettivamente connessi
+                Network network = mainNetworkNode.getNetwork();
+                if (network != null) {
+                    // Rimuovi lo storage virtuale dalla rete prima della disconnessione
+                    if (network.getComponent(StorageNetworkComponent.class) instanceof RootStorage rootStorage) {
+                        if (rootStorage.hasSource(s -> s == virtualStorage)) {
+                            rootStorage.removeSource(virtualStorage);
+                            LOGGER.debug("Storage virtuale rimosso dalla rete RS");
+                        }
+                    }
+                    
+                    // Forza l'aggiornamento della rete
+                    // Questo è importante per garantire che la rete non mantenga riferimenti invalidi
+                    if (network.getComponent(GraphNetworkComponent.class) != null) {
+                        mainNetworkNode.setNetwork(null);
+                        LOGGER.debug("Rimosso riferimento alla rete dal nodo principale");
+                    }
+                }
+                
+                // Imposta lo stato
+                active = false;
+                connected = false;
+                
+                // Notifica l'entità principale
+                if (mainEntity != null) {
+                    mainEntity.onRefinedStorageNetworkChanged(false, null);
+                    LOGGER.debug("Entità principale notificata della disconnessione");
+                }
+                
+                // Marca come modificato per assicurarsi che il mondo salvi il cambiamento
+                // Ma evita di farlo se stiamo già salvando
+                if (!worldSaving) {
+                    setChanged();
+                }
+                
+                // Salva lo stato dello storage virtuale nella memoria statica
+                // per preservarlo durante la ricostruzione dell'entità
+                if (!virtualItems.isEmpty()) {
+                    savedVirtualItems.put(worldPosition, new HashMap<>(virtualItems));
+                    LOGGER.debug("Salvati {} item virtuali per la posizione {}", virtualItems.size(), worldPosition);
+                }
+            } catch (Exception e) {
+                LOGGER.error("Errore durante la disconnessione dalla rete: {}", e.getMessage(), e);
+            } finally {
+                // Ripristina il flag per consentire aggiornamenti futuri
+                safeToUpdate = true;
+            }
+        }
+    }
+    
+    /**
+     * Gestisce il problema della riconnessione ciclica
+     * Questo metodo tenta di riconnettere l'entità alla rete in modo pulito
+     */
+    public void reconnectToNetwork() {
+        if (level == null || level.isClientSide()) {
+            return;
+        }
+        
+        try {
+            LOGGER.debug("Tentativo di riconnessione alla rete RS alla posizione {}", worldPosition);
             
-            // Notifica l'entità principale
-            if (mainEntity != null) {
-                mainEntity.onRefinedStorageNetworkChanged(false, null);
+            // Verifica se siamo già connessi
+            if (mainNetworkNode.getNetwork() != null && active) {
+                LOGGER.debug("L'entità è già connessa a una rete RS, nessuna azione necessaria");
+                return;
             }
             
-            // La disconnessione dalla rete avviene automaticamente quando il blocco viene rimosso
-            // grazie alla classe AbstractBaseNetworkNodeContainerBlockEntity
+            // Prima verifica se il chunk è caricato
+            if (!level.hasChunkAt(worldPosition)) {
+                LOGGER.debug("Il chunk per la posizione {} non è caricato, non posso riconnettere", worldPosition);
+                return;
+            }
+            
+            // Forza l'aggiornamento dei blocchi adiacenti per attivare la rete
+            for (Direction direction : Direction.values()) {
+                BlockPos neighborPos = worldPosition.relative(direction);
+                
+                // Verifica se il blocco adiacente è un cavo RS
+                if (isRefinedStorageCable(level.getBlockState(neighborPos))) {
+                    LOGGER.debug("Forzo aggiornamento blocco RS a {}", neighborPos);
+                    level.neighborChanged(neighborPos, level.getBlockState(worldPosition).getBlock(), worldPosition);
+                }
+            }
+            
+            // Forza il chunk a salvare i cambiamenti
+            level.getChunkAt(worldPosition).setUnsaved(true);
+            
+            // Notifica esplicita di cambiamento al chunk
+            if (level instanceof ServerLevel serverLevel) {
+                serverLevel.getChunkSource().blockChanged(worldPosition);
+            }
             
             // Marca come modificato per assicurarsi che il mondo salvi il cambiamento
             setChanged();
+            
+            LOGGER.debug("Riconnessione alla rete RS completata");
+        } catch (Exception e) {
+            LOGGER.error("Errore durante la riconnessione alla rete: {}", e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public void onChunkUnloaded() {
+        // Quando il chunk viene scaricato, salviamo lo stato dello storage virtuale
+        if (level != null && !level.isClientSide() && !virtualItems.isEmpty()) {
+            // Disattiva temporaneamente gli aggiornamenti
+            safeToUpdate = false;
+            
+            savedVirtualItems.put(worldPosition, new HashMap<>(virtualItems));
+            LOGGER.debug("Chunk scaricato, salvati {} item virtuali per la posizione {}", virtualItems.size(), worldPosition);
+            
+            // Esegui la disconnessione ma evitando di chiamare setChanged()
+            try {
+                disconnectFromNetwork();
+            } catch (Exception e) {
+                LOGGER.error("Errore durante la disconnessione al chunk unload: {}", e.getMessage());
+            }
+            
+            super.onChunkUnloaded();
+            
+            // Ripristina il flag per consentire aggiornamenti futuri
+            safeToUpdate = true;
+        } else {
+            super.onChunkUnloaded();
+        }
+    }
+
+    @Override
+    public void setRemoved() {
+        // Quando l'entità viene rimossa, eseguiamo una disconnessione pulita
+        if (level != null && !level.isClientSide()) {
+            // Disattiva temporaneamente gli aggiornamenti
+            safeToUpdate = false;
+            
+            // Ferma il thread di monitoraggio
+            if (monitorThread != null && monitorThread.isAlive()) {
+                monitorThread.interrupt();
+                LOGGER.debug("Thread di monitoraggio interrotto durante la rimozione dell'entità");
+            }
+            
+            try {
+                disconnectFromNetwork();
+            } catch (Exception e) {
+                LOGGER.error("Errore durante la disconnessione in setRemoved: {}", e.getMessage());
+            }
+            
+            super.setRemoved();
+            
+            // Ripristina il flag per consentire aggiornamenti futuri
+            safeToUpdate = true;
+        } else {
+            super.setRemoved();
         }
     }
     
     @Override
     public void saveAdditional(CompoundTag tag, HolderLookup.Provider registries) {
-        super.saveAdditional(tag, registries);
+        // Disattiva temporaneamente gli aggiornamenti
+        boolean oldSafeToUpdate = safeToUpdate;
+        safeToUpdate = false;
         
-        // Salva lo stato della rete RS
-        tag.putBoolean("rs_connected", connected);
-        tag.putBoolean("rs_active", active);
+        try {
+            super.saveAdditional(tag, registries);
+            
+            // Salva lo stato della rete RS
+            tag.putBoolean("rs_connected", connected);
+            tag.putBoolean("rs_active", active);
+            
+            // Salva anche lo stato dello storage virtuale nella memoria statica
+            // per preservarlo durante la ricostruzione dell'entità
+            if (!virtualItems.isEmpty()) {
+                savedVirtualItems.put(worldPosition, new HashMap<>(virtualItems));
+                LOGGER.debug("Salvati {} item virtuali per la posizione {}", virtualItems.size(), worldPosition);
+            }
+        } finally {
+            // Ripristina il flag allo stato precedente
+            safeToUpdate = oldSafeToUpdate;
+        }
     }
     
     @Override
@@ -184,6 +404,13 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
         }
         if (tag.contains("rs_active")) {
             active = tag.getBoolean("rs_active");
+        }
+        
+        // Ripristina lo stato dello storage virtuale dalla memoria statica
+        if (savedVirtualItems.containsKey(worldPosition)) {
+            virtualItems.clear();
+            virtualItems.putAll(savedVirtualItems.get(worldPosition));
+            LOGGER.debug("Ripristinati {} item virtuali dalla memoria statica", virtualItems.size());
         }
     }
     
@@ -199,17 +426,17 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
         return Component.literal("RS Bridge");
     }
 
+    /**
+     * Aggiorna il menu (GUI) del bridge con le informazioni necessarie
+     * Questo metodo è chiamato dal server quando il cliente richiede informazioni
+     * 
+     * @return Un oggetto BridgeData contenente le informazioni per il menu
+     */
     @Override
     public BridgeData getMenuData() {
-        // Creiamo i dati dei contenitori vuoti per ora
-        ResourceContainerData filterData = new ResourceContainerData(new ArrayList<>());
-        ResourceContainerData exportedData = new ResourceContainerData(new ArrayList<>());
-        
-        return new BridgeData(
-            filterData,
-            exportedData,
-            new ArrayList<>(exportingIndicators)
-        );
+        // Ritorniamo null per evitare problemi di serializzazione
+        // Non è necessario implementare questa interfaccia completamente
+        return null;
     }
 
     @Override
@@ -219,8 +446,8 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
 
     @Override
     public AbstractContainerMenu createMenu(int syncId, Inventory inv, Player player) {
-        // Implementazione del menu container
-        return null; // TODO: Implementare il container menu appropriato
+        // Non apriremo un container GUI per questo blocco
+        return null;
     }
     
     @Override
@@ -234,10 +461,20 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
      */
     @Override
     public void setChanged() {
+        // Se siamo in fase di salvataggio o non è sicuro aggiornare, evita aggiornamenti
+        if (worldSaving || !safeToUpdate) {
+            LOGGER.debug("Ignorato setChanged durante salvataggio/scaricamento per {}", worldPosition);
+            super.setChanged();
+            return;
+        }
+        
         super.setChanged();
         
         // Quando l'entità viene modificata, verifica lo stato della connessione
         if (level != null && !level.isClientSide()) {
+            // Sincronizza il MatterNetwork dall'entità principale
+            syncMatterNetwork();
+            
             // Forza un aggiornamento esplicito del nodo di rete
             LOGGER.debug("Bridge: Aggiornamento dell'entità RS, verifico lo stato della rete");
             
@@ -274,6 +511,16 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
         if (level != null && !level.isClientSide()) {
             LOGGER.debug("Bridge RS: onLoad chiamato alla posizione {}", worldPosition);
             
+            // Sincronizza subito il MatterNetwork dall'entità principale
+            syncMatterNetwork();
+            
+            // Registra immediatamente lo storage virtuale nella rete RS
+            if (mainNetworkNode != null && mainNetworkNode.getNetwork() != null) {
+                registerVirtualStorage(mainNetworkNode.getNetwork());
+                LOGGER.debug("Storage virtuale registrato durante onLoad");
+            }
+            
+            // Continua con l'implementazione esistente
             // Forza un aggiornamento di tutti i blocchi adiacenti
             for (Direction direction : Direction.values()) {
                 BlockPos neighborPos = worldPosition.relative(direction);
@@ -296,6 +543,15 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
                     LOGGER.debug("Bridge RS: Forzo ricalcolo rete dopo delay per {}", worldPosition);
                     if (mainNetworkNode != null) {
                         setChanged();
+                        
+                        // Registra di nuovo lo storage virtuale
+                        if (mainNetworkNode.getNetwork() != null) {
+                            registerVirtualStorage(mainNetworkNode.getNetwork());
+                            LOGGER.debug("Storage virtuale registrato dopo delay");
+                            
+                            // Avvia il serverTick dopo la registrazione
+                            serverTick(level, worldPosition, getBlockState(), this);
+                        }
                     }
                     
                     // Force block update to notify neighbors
@@ -306,6 +562,9 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
                         BlockPos neighborPos = worldPosition.relative(direction);
                         level.neighborChanged(neighborPos, getBlockState().getBlock(), worldPosition);
                     }
+                    
+                    // Sincronizza di nuovo il MatterNetwork dopo il delay
+                    syncMatterNetwork();
                 }));
             }
         }
@@ -318,5 +577,968 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
         String blockClass = state.getBlock().getClass().getName().toLowerCase();
         return blockClass.contains("refinedstorage") && 
                (blockClass.contains("cable") || blockClass.equals("cableblock"));
+    }
+
+    /**
+     * Aggiorna il riferimento al MatterNetwork dall'entità principale
+     * Questo metodo dovrebbe essere chiamato periodicamente per mantenere sincronizzate le reti
+     */
+    public void syncMatterNetwork() {
+        // Limita la frequenza di sincronizzazione per evitare sovraccarichi
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastNetworkSyncTime < 1000) { // massimo una volta al secondo
+            return;
+        }
+        
+        if (mainEntity != null) {
+            MatterNetwork network = mainEntity.getReplicationNetwork();
+            if (network != this.matterNetwork) {
+                this.matterNetwork = network;
+                LOGGER.debug("MatterNetwork sincronizzato da entità principale a {}", worldPosition);
+            }
+        } else {
+            this.matterNetwork = null;
+        }
+        
+        lastNetworkSyncTime = currentTime;
+    }
+    
+    /**
+     * Ottiene il MatterNetwork corrente, sincronizzandolo se necessario
+     * @return Il MatterNetwork di Replication, o null se non disponibile
+     */
+    public MatterNetwork getMatterNetwork() {
+        syncMatterNetwork();
+        return matterNetwork;
+    }
+    
+    /**
+     * Classe per lo storage virtuale
+     * Questa classe implementa l'interfaccia Storage di Refined Storage per simulare
+     * la presenza di item nel network ma solo in modalità estrazione (extract-only).
+     * 
+     * Lo storage virtuale è di "sola estrazione" (extract-only) perché:
+     * 1. Il metodo insert() restituisce sempre 0, rifiutando qualsiasi tentativo di inserimento
+     * 2. Il metodo extract() permette di estrarre gli item normalmente
+     * 
+     * Questo comportamento consente agli item di essere visualizzati nell'interfaccia di
+     * Refined Storage e di essere utilizzati per crafting o estrazione, ma impedisce che 
+     * vengano inseriti elementi dall'esterno in questo storage.
+     * 
+     * L'utilizzo principale è per rappresentare la materia presente nel network di Replication
+     * come item virtuali all'interno del network di Refined Storage.
+     */
+    private class VirtualStorage implements Storage {
+        // Capacità massima dello storage (per limitare l'inserimento)
+        private static final long MAX_CAPACITY = Long.MAX_VALUE;
+        
+        // Lista interna degli item, per un comportamento più simile a StorageImpl
+        private final com.refinedmods.refinedstorage.api.resource.list.MutableResourceList resourceList;
+        private boolean initialized = false;
+        
+        public VirtualStorage() {
+            try {
+                // Creiamo una lista di risorse interna usando i metodi forniti dall'API
+                Class<?> resourceListClass = Class.forName("com.refinedmods.refinedstorage.api.resource.list.MutableResourceListImpl");
+                Method createMethod = resourceListClass.getMethod("create");
+                this.resourceList = (com.refinedmods.refinedstorage.api.resource.list.MutableResourceList) createMethod.invoke(null);
+            } catch (Exception e) {
+                LOGGER.error("Errore nell'inizializzazione del VirtualStorage: {}", e.getMessage(), e);
+                throw new RuntimeException("Impossibile inizializzare il VirtualStorage", e);
+            }
+        }
+        
+        /**
+         * Sincronizza la mappa virtualItems interna con la lista di risorse
+         */
+        public void syncFromVirtualItems() {
+            if (resourceList == null) {
+                return;
+            }
+            
+            try {
+                // Svuota la lista attuale
+                Method clearMethod = resourceList.getClass().getMethod("clear");
+                clearMethod.invoke(resourceList);
+                
+                // Aggiungi tutti gli item dalla mappa alla lista
+                Method addMethod = resourceList.getClass().getMethod("add", ResourceKey.class, long.class);
+                
+                for (Map.Entry<ResourceKey, Long> entry : virtualItems.entrySet()) {
+                    if (entry.getValue() > 0) {
+                        addMethod.invoke(resourceList, entry.getKey(), entry.getValue());
+                    }
+                }
+                
+                initialized = true;
+                LOGGER.debug("VirtualStorage sincronizzato con {} item", virtualItems.size());
+            } catch (Exception e) {
+                LOGGER.error("Errore durante la sincronizzazione del VirtualStorage: {}", e.getMessage(), e);
+            }
+        }
+        
+        /**
+         * Sincronizza la lista di risorse con la mappa virtualItems interna
+         */
+        public void syncToVirtualItems() {
+            if (resourceList == null) {
+                return;
+            }
+            
+            try {
+                // Svuota la mappa attuale
+                virtualItems.clear();
+                
+                // Recupera tutti gli item dalla lista
+                for (ResourceAmount amount : getAll()) {
+                    if (amount.amount() > 0) {
+                        virtualItems.put(amount.resource(), amount.amount());
+                    }
+                }
+                
+                LOGGER.debug("VirtualItems sincronizzato con {} item dalla lista interna", virtualItems.size());
+            } catch (Exception e) {
+                LOGGER.error("Errore durante la sincronizzazione dei VirtualItems: {}", e.getMessage(), e);
+            }
+        }
+        
+        /**
+         * Implementazione di insert che rifiuta tutte le inserzioni.
+         * Questo metodo è fondamentale per rendere lo storage di sola estrazione (extract-only).
+         * Quando qualsiasi tentativo di inserimento viene effettuato, restituiamo 0 per indicare 
+         * che nessun item è stato accettato. Questo permette di visualizzare gli item nel network
+         * ma impedisce che vengano utilizzati come destinazione di trasferimento o crafting.
+         */
+        @Override
+        public long insert(ResourceKey resource, long amount, Action action, Actor actor) {
+            // Log dettagliato solo se non è una simulazione (per evitare spam nel log)
+            if (action == Action.EXECUTE) {
+                LOGGER.debug("[STORAGE VIRTUALE] Tentativo di inserimento rifiutato: {} x{} da {}",
+                    resource, amount, actor != null ? actor.toString() : "sconosciuto");
+            }
+            
+            // Rifiuta qualsiasi inserimento restituendo 0
+            return 0;
+        }
+        
+        /**
+         * Implementazione di extract che permette l'estrazione di item dal network virtuale.
+         * Questo metodo completa la funzionalità extract-only dello storage virtuale, consentendo
+         * agli item di essere estratti e utilizzati nel network di Refined Storage.
+         * L'estrazione aggiorna sia la lista interna che la mappa virtualItems.
+         */
+        @Override
+        public long extract(ResourceKey resource, long amount, Action action, Actor actor) {
+            if (amount <= 0) {
+                return 0;
+            }
+            
+            // Assicurati che la lista interna sia sincronizzata
+            if (!initialized) {
+                syncFromVirtualItems();
+            }
+            
+            try {
+                // Verifica la quantità attuale
+                Method getMethod = resourceList.getClass().getMethod("get", ResourceKey.class);
+                long currentAmount = (long) getMethod.invoke(resourceList, resource);
+                
+                if (currentAmount <= 0) {
+                    // Logging solo se non è una simulazione e se è stata effettivamente richiesta una risorsa specifica
+                    if (action == Action.EXECUTE) {
+                        LOGGER.debug("[STORAGE VIRTUALE] Tentativo di estrazione fallito (risorsa non disponibile): {} da {}",
+                            resource, actor != null ? actor.toString() : "sconosciuto");
+                    }
+                    return 0;
+                }
+                
+                long extracted = Math.min(currentAmount, amount);
+                
+                // Log dettagliato per l'estrazione
+                if (action == Action.EXECUTE) {
+                    LOGGER.debug("[STORAGE VIRTUALE] Estrazione: {} x{} da {} (disponibili: {})",
+                        resource, extracted, actor != null ? actor.toString() : "sconosciuto", currentAmount);
+                }
+                
+                if (action == Action.EXECUTE && extracted > 0) {
+                    // Rimuovi dalla lista interna
+                    Method removeMethod = resourceList.getClass().getMethod("remove", ResourceKey.class, long.class);
+                    removeMethod.invoke(resourceList, resource, extracted);
+                    
+                    // Aggiorna anche la mappa virtualItems
+                    long newAmount = virtualItems.getOrDefault(resource, 0L) - extracted;
+                    if (newAmount <= 0) {
+                        virtualItems.remove(resource);
+                    } else {
+                        virtualItems.put(resource, newAmount);
+                    }
+                    
+                    LOGGER.debug("[STORAGE VIRTUALE] Item {} estratto con successo, quantità: {}, rimanenti: {}", 
+                        resource, extracted, newAmount);
+                }
+                
+                return extracted;
+            } catch (Exception e) {
+                LOGGER.error("Errore durante l'estrazione dell'item: {}", e.getMessage(), e);
+                return 0;
+            }
+        }
+        
+        @Override
+        public long getStored() {
+            // Assicurati che la lista interna sia sincronizzata
+            if (!initialized) {
+                syncFromVirtualItems();
+            }
+            
+            try {
+                // Usa la somma dei valori nella mappa virtualItems
+                return virtualItems.values().stream().mapToLong(Long::longValue).sum();
+            } catch (Exception e) {
+                LOGGER.error("Errore durante il calcolo degli item immagazzinati: {}", e.getMessage(), e);
+                return 0;
+            }
+        }
+        
+        @Override
+        public Collection<ResourceAmount> getAll() {
+            // Assicurati che la lista interna sia sincronizzata
+            if (!initialized) {
+                syncFromVirtualItems();
+            }
+            
+            try {
+                // Ottieni tutti gli item dalla lista interna
+                Method copyStateMethod = resourceList.getClass().getMethod("copyState");
+                @SuppressWarnings("unchecked")
+                Collection<ResourceAmount> result = (Collection<ResourceAmount>) copyStateMethod.invoke(resourceList);
+                
+                // Se non ci sono risultati, prova a creare una lista manualmente
+                if (result == null || result.isEmpty()) {
+                    result = new ArrayList<>();
+                    for (Map.Entry<ResourceKey, Long> entry : virtualItems.entrySet()) {
+                        if (entry.getValue() > 0) {
+                            result.add(new ResourceAmount(entry.getKey(), entry.getValue()));
+                        }
+                    }
+                }
+                
+                return result;
+            } catch (Exception e) {
+                LOGGER.error("Errore durante il recupero degli item: {}", e.getMessage(), e);
+                
+                // Fallback: crea una lista manualmente
+                List<ResourceAmount> fallbackResult = new ArrayList<>();
+                for (Map.Entry<ResourceKey, Long> entry : virtualItems.entrySet()) {
+                    if (entry.getValue() > 0) {
+                        fallbackResult.add(new ResourceAmount(entry.getKey(), entry.getValue()));
+                    }
+                }
+                return fallbackResult;
+            }
+        }
+    }
+    
+    /**
+     * Registra il nostro storage virtuale nella rete RS
+     */
+    private void registerVirtualStorage(Network network) {
+        try {
+            if (network != null) {
+                LOGGER.warn("[REGISTRAZIONE] Inizio registrazione storage virtuale nella rete RS");
+                StorageNetworkComponent storageNetworkComponent = network.getComponent(StorageNetworkComponent.class);
+                if (storageNetworkComponent instanceof RootStorage rootStorage) {
+                    // Verifica se il nostro storage è già stato aggiunto
+                    if (!rootStorage.hasSource(s -> s == virtualStorage)) {
+                        LOGGER.warn("[REGISTRAZIONE] Aggiunta nuovo storage virtuale al RootStorage");
+                        
+                        // Sincronizza lo storage virtuale prima di aggiungerlo
+                        virtualStorage.syncFromVirtualItems();
+                        
+                        // Aggiunge lo storage alla rete
+                        rootStorage.addSource(virtualStorage);
+                        LOGGER.warn("[REGISTRAZIONE] Storage virtuale aggiunto con successo");
+                        
+                        // Forza un aggiornamento dello storage dopo l'aggiunta
+                        forceStorageUpdate(network);
+                        
+                        // Registra un intercettore per gli item inseriti nella rete
+                        // Questo è fondamentale per intercettare e rimuovere gli item di materia virtuale
+                        // che vengono aggiunti alla rete in modi diversi (per esempio, tramite importer)
+                        try {
+                            registerRootStorageInterceptor(rootStorage);
+                        } catch (Exception e) {
+                            LOGGER.error("[REGISTRAZIONE] Errore durante la registrazione dell'intercettore: {}", e.getMessage(), e);
+                        }
+                        
+                        // Aggiungi un listener per debug
+                        try {
+                            // Aggiungi un RootStorageListener per diagnostica
+                            Class<?> listenerClass = Class.forName("com.refinedmods.refinedstorage.api.storage.root.RootStorageListener");
+                            Object listener = java.lang.reflect.Proxy.newProxyInstance(
+                                listenerClass.getClassLoader(),
+                                new Class<?>[] { listenerClass },
+                                (proxy, method, args) -> {
+                                    if (method.getName().contains("onChange")) {
+                                        LOGGER.warn("[LISTENER] Cambiamento nella rete RS rilevato");
+                                    }
+                                    // Restituisce un valore di default
+                                    return method.getReturnType().equals(void.class) ? null : 0L;
+                                }
+                            );
+                            
+                            // Aggiungi il listener
+                            Method addListenerMethod = rootStorage.getClass().getMethod("addListener", listenerClass);
+                            addListenerMethod.invoke(rootStorage, listener);
+                            LOGGER.warn("[REGISTRAZIONE] Aggiunto listener diagnostico allo storage");
+                        } catch (Exception e) {
+                            LOGGER.debug("[REGISTRAZIONE] Impossibile aggiungere listener diagnostico: {}", e.getMessage());
+                        }
+                    } else {
+                        LOGGER.warn("[REGISTRAZIONE] Storage virtuale già presente nella rete RS");
+                        
+                        // Sincronizza e forza l'aggiornamento comunque
+                        virtualStorage.syncFromVirtualItems();
+                        forceStorageUpdate(network);
+                    }
+                } else {
+                    LOGGER.warn("[REGISTRAZIONE] Impossibile accedere al RootStorage della rete RS");
+                }
+                LOGGER.warn("[REGISTRAZIONE] Fine registrazione storage virtuale");
+            }
+        } catch (Exception e) {
+            LOGGER.error("Errore durante la registrazione dello storage virtuale: {}", e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Registra un intercettore per monitorare e rimuovere automaticamente
+     * gli item di materia virtuale inseriti nella rete
+     */
+    private void registerRootStorageInterceptor(RootStorage rootStorage) throws Exception {
+        if (rootStorage == null) {
+            return;
+        }
+        
+        LOGGER.warn("[INTERCEPTOR] Installazione interceptor per la pulizia automatica degli item di materia virtuale");
+        
+        // Ferma eventuali thread precedenti
+        if (monitorThread != null && monitorThread.isAlive()) {
+            monitorThread.interrupt();
+            LOGGER.warn("[INTERCEPTOR] Thread di monitoraggio precedente terminato");
+        }
+        
+        // Estrattore di item di materia virtuale dalla rete RS
+        // La seguente classe implementa un intercettore che monitora la rete RS
+        // e rimuove automaticamente gli item di materia virtuale inseriti
+        // Il suo funzionamento dipende dall'implementazione interna di RootStorage
+        
+        try {
+            // Ottieni il metodo di accesso agli storages
+            Method getStoragesMethod = rootStorage.getClass().getDeclaredMethod("getStorages");
+            getStoragesMethod.setAccessible(true);
+            Object storages = getStoragesMethod.invoke(rootStorage);
+            
+            if (storages == null) {
+                LOGGER.warn("[INTERCEPTOR] Impossibile accedere agli storages interni");
+                return;
+            }
+            
+            // Inizia un thread di monitoraggio per intercettare e rimuovere gli item
+            monitorThread = new Thread(() -> {
+                LOGGER.warn("[INTERCEPTOR] Thread di monitoraggio avviato");
+                
+                while (level != null && !level.isClientSide() && !isRemoved()) {
+                    try {
+                        // Verifica se siamo connessi alla rete
+                        Network network = mainNetworkNode.getNetwork();
+                        if (network == null) {
+                            // Se la rete non è disponibile, interrompi il monitoraggio
+                            break;
+                        }
+                        
+                        // Pulisci gli item di materia virtuale non gestiti
+                        cleanupVirtualMatterItems(network);
+                        
+                        // Attendi prima del prossimo controllo (ogni 2 secondi)
+                        Thread.sleep(2000);
+                    } catch (InterruptedException e) {
+                        break;
+                    } catch (Exception e) {
+                        LOGGER.error("[INTERCEPTOR] Errore durante il monitoraggio: {}", e.getMessage(), e);
+                        break;
+                    }
+                }
+                
+                LOGGER.warn("[INTERCEPTOR] Thread di monitoraggio terminato");
+            });
+            
+            // Imposta il thread come daemon per farlo terminare quando il server si spegne
+            monitorThread.setDaemon(true);
+            monitorThread.setName("RS-Bridge-ItemMonitor");
+            monitorThread.start();
+            
+            LOGGER.warn("[INTERCEPTOR] Interceptor installato con successo");
+        } catch (Exception e) {
+            LOGGER.error("[INTERCEPTOR] Errore durante l'installazione dell'interceptor: {}", e.getMessage(), e);
+            throw e;
+        }
+    }
+    
+    /**
+     * Forza un aggiornamento della vista degli item nel network
+     */
+    private void forceStorageUpdate(Network network) {
+        // Se siamo in fase di salvataggio o non è sicuro aggiornare, evita aggiornamenti
+        if (worldSaving || !safeToUpdate) {
+            LOGGER.debug("Ignorato forceStorageUpdate durante salvataggio/scaricamento");
+            return;
+        }
+        
+        try {
+            if (network != null) {
+                LOGGER.warn("[AGGIORNAMENTO] Inizio aggiornamento vista nella rete RS");
+                
+                // In questa versione dell'API, dobbiamo notificare i listeners della rete
+                if (network.getComponent(StorageNetworkComponent.class) instanceof RootStorage rootStorage) {
+                    // Sincronizza lo storage prima dell'aggiornamento
+                    virtualStorage.syncFromVirtualItems();
+                    
+                    // Prima di tutto, proviamo a notificare i listener direttamente
+                    try {
+                        Method getListenersMethod = rootStorage.getClass().getDeclaredMethod("getListeners");
+                        getListenersMethod.setAccessible(true);
+                        Object listeners = getListenersMethod.invoke(rootStorage);
+                        
+                        if (listeners instanceof Collection) {
+                            @SuppressWarnings("unchecked")
+                            Collection<Object> listenerCollection = (Collection<Object>) listeners;
+                            
+                            LOGGER.warn("[AGGIORNAMENTO] Notifica diretta a {} listener", listenerCollection.size());
+                            
+                            // Per ogni listener, chiama il metodo onChanged
+                            for (Object listener : listenerCollection) {
+                                try {
+                                    for (Method method : listener.getClass().getMethods()) {
+                                        if (method.getName().contains("onChange") || method.getName().equals("onChanged")) {
+                                            try {
+                                                method.invoke(listener);
+                                                LOGGER.debug("[AGGIORNAMENTO] Notificato listener usando {}", method.getName());
+                                            } catch (Exception e) {
+                                                // Ignora errori specifici
+                                            }
+                                        }
+                                    }
+                                } catch (Exception e) {
+                                    // Ignora errori per listener singoli
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        LOGGER.debug("[AGGIORNAMENTO] Impossibile notificare i listener direttamente: {}", e.getMessage());
+                    }
+                    
+                    // Tenta di invalidare la cache di RootStorage
+                    boolean methodCalled = false;
+                    
+                    // Prima prova il metodo invalidate() che è comune in molte implementazioni
+                    try {
+                        LOGGER.warn("[AGGIORNAMENTO] Provo metodo invalidate()");
+                        Method invalidateMethod = rootStorage.getClass().getMethod("invalidate");
+                        invalidateMethod.invoke(rootStorage);
+                        LOGGER.warn("[AGGIORNAMENTO] Rete aggiornata usando invalidate()");
+                        methodCalled = true;
+                    } catch (Exception e) {
+                        LOGGER.warn("[AGGIORNAMENTO] Il metodo invalidate() non è disponibile: {}", e.getMessage());
+                    }
+                    
+                    // Se il metodo precedente fallisce, prova con altri metodi comuni
+                    if (!methodCalled) {
+                        LOGGER.warn("[AGGIORNAMENTO] Provo altri metodi di invalidazione");
+                        for (Method method : rootStorage.getClass().getMethods()) {
+                            if ((method.getName().contains("invalidate") || 
+                                 method.getName().contains("notifyListener") || 
+                                 method.getName().contains("notify") || 
+                                 method.getName().contains("refresh") ||
+                                 method.getName().contains("changed") ||
+                                 method.getName().contains("markDirty")) && 
+                                method.getParameterCount() == 0) {
+                                
+                                try {
+                                    method.setAccessible(true);
+                                    method.invoke(rootStorage);
+                                    LOGGER.warn("[AGGIORNAMENTO] Aggiornata la rete usando metodo {}", method.getName());
+                                    methodCalled = true;
+                                    break;
+                                } catch (Exception e) {
+                                    // Continua con il prossimo metodo
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Metodo drastico: forza un aggiornamento rimuovendo e riaggiungendo lo storage
+                    // Ma solo se NON stiamo salvando o scaricando
+                    if (!methodCalled && !worldSaving) {
+                        try {
+                            LOGGER.warn("[AGGIORNAMENTO] Tentativo di rimuovere e riaggiungere lo storage");
+                            if (rootStorage.hasSource(s -> s == virtualStorage)) {
+                                rootStorage.removeSource(virtualStorage);
+                                virtualStorage.syncFromVirtualItems(); // Sincronizza di nuovo
+                                rootStorage.addSource(virtualStorage);
+                                LOGGER.warn("[AGGIORNAMENTO] Storage rimosso e riaggiunto con successo");
+                                methodCalled = true;
+                            }
+                        } catch (Exception e) {
+                            LOGGER.warn("[AGGIORNAMENTO] Errore durante la rimozione/aggiunta dello storage: {}", e.getMessage());
+                        }
+                    }
+                    
+                    if (!methodCalled) {
+                        LOGGER.warn("[AGGIORNAMENTO] Non è stato possibile trovare un metodo appropriato per aggiornare la rete");
+                    }
+                    
+                    LOGGER.warn("[AGGIORNAMENTO] Aggiornamento vista completato per {} item virtuali", virtualItems.size());
+                }
+                
+                LOGGER.warn("[AGGIORNAMENTO] Fine aggiornamento vista nella rete RS");
+            }
+        } catch (Exception e) {
+            LOGGER.error("Errore durante l'aggiornamento della vista degli item: {}", e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Metodo per rendere un ItemStack visibile nel network di Refined Storage
+     * 
+     * @param stack L'item da rendere visibile nel network
+     * @param amount La quantità dell'item
+     * @return true se l'operazione è riuscita, false altrimenti
+     */
+    public boolean addVirtualItemToNetwork(ItemStack stack, int amount) {
+        if (stack.isEmpty() || amount <= 0) {
+            return false;
+        }
+        
+        try {
+            LOGGER.warn("[ADD ITEM] Inizio procedura per aggiungere {} x{}", stack.getItem().getDescriptionId(), amount);
+            
+            // Crea un ResourceKey utilizzando il metodo corretto
+            ResourceKey resourceKey = null;
+            
+            // Utilizzo diretto di ItemResource.ofItemStack
+            try {
+                // Questo crea un ItemResource che implementa ResourceKey direttamente
+                Class<?> itemResourceClass = Class.forName("com.refinedmods.refinedstorage.common.support.resource.ItemResource");
+                Method ofItemStackMethod = itemResourceClass.getMethod("ofItemStack", ItemStack.class);
+                resourceKey = (ResourceKey) ofItemStackMethod.invoke(null, stack);
+                LOGGER.warn("[ADD ITEM] Creato ResourceKey con ItemResource.ofItemStack: {}", resourceKey);
+            } catch (Exception e) {
+                LOGGER.warn("[ADD ITEM] Errore con ItemResource.ofItemStack: {}", e.getMessage());
+                
+                // Prova altri approcci
+                try {
+                    // Prova a utilizzare il ResourceFactory dell'API
+                    Class<?> resourceFactoryClass = RefinedStorageApi.INSTANCE.getItemResourceFactory().getClass();
+                    Method createMethod = resourceFactoryClass.getMethod("create", ItemStack.class);
+                    Object resourceAmount = ((java.util.Optional<?>) createMethod.invoke(RefinedStorageApi.INSTANCE.getItemResourceFactory(), stack)).orElse(null);
+                    
+                    if (resourceAmount != null) {
+                        // Estrai la ResourceKey dalla ResourceAmount
+                        Method resourceMethod = resourceAmount.getClass().getMethod("resource");
+                        resourceKey = (ResourceKey) resourceMethod.invoke(resourceAmount);
+                        LOGGER.warn("[ADD ITEM] Creato ResourceKey usando ResourceFactory: {}", resourceKey);
+                    }
+                } catch (Exception ex) {
+                    LOGGER.warn("[ADD ITEM] Errore con ResourceFactory: {}", ex.getMessage());
+                }
+            }
+            
+            // Se ancora non abbiamo un ResourceKey, prova a recuperarne uno esistente
+            if (resourceKey == null) {
+                // Prova prima a usare il sistema standard
+                try {
+                    for (ResourceKey key : virtualItems.keySet()) {
+                        // Verifica se la chiave contiene il nome dell'item
+                        if (key.toString().contains(BuiltInRegistries.ITEM.getKey(stack.getItem()).toString())) {
+                            resourceKey = key;
+                            LOGGER.warn("[ADD ITEM] Trovato ResourceKey esistente: {}", key);
+                            break;
+                        }
+                    }
+                } catch (Exception e) {
+                    LOGGER.warn("[ADD ITEM] Errore nella ricerca di ResourceKey esistenti: {}", e.getMessage());
+                }
+            }
+            
+            // Se ancora non abbiamo un ResourceKey, non possiamo procedere
+            if (resourceKey == null) {
+                LOGGER.warn("[ADD ITEM] Impossibile creare ResourceKey per l'item {}", stack.getItem().getDescriptionId());
+                return false;
+            }
+            
+            // Aggiungi l'item alla mappa degli item virtuali
+            long currentAmount = virtualItems.getOrDefault(resourceKey, 0L);
+            virtualItems.put(resourceKey, currentAmount + amount);
+            
+            // Aggiorna la lista interna
+            if (virtualStorage.initialized) {
+                virtualStorage.syncFromVirtualItems();
+            }
+            
+            LOGGER.warn("[ADD ITEM] Item {} aggiunto con successo, quantità: {}", stack.getItem().getDescriptionId(), amount);
+            return true;
+        } catch (Exception e) {
+            LOGGER.error("Errore durante l'aggiunta dell'item virtuale: {}", e.getMessage(), e);
+            return false;
+        }
+    }
+    
+    /**
+     * Rimuove un item virtuale dal network di Refined Storage
+     * 
+     * @param stack L'item da rimuovere
+     * @param amount La quantità da rimuovere
+     * @return true se l'operazione è riuscita, false altrimenti
+     */
+    public boolean removeVirtualItemFromNetwork(ItemStack stack, int amount) {
+        if (stack.isEmpty() || amount <= 0) {
+            return false;
+        }
+        
+        try {
+            // Verifica se siamo connessi alla rete Refined Storage
+            Network rsNetwork = mainNetworkNode.getNetwork();
+            if (rsNetwork == null) {
+                LOGGER.debug("Non c'è una connessione alla rete Refined Storage, non posso rimuovere item virtuali");
+                return false;
+            }
+            
+            // Crea un identificatore unico per l'item basato sul suo ResourceLocation
+            String itemId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+            
+            // Cerca il ResourceKey corrispondente
+            ResourceKey resourceKey = null;
+            for (ResourceKey key : virtualItems.keySet()) {
+                // Verifica se la chiave contiene il nome dell'item
+                if (key.toString().contains(itemId)) {
+                    resourceKey = key;
+                    break;
+                }
+            }
+            
+            if (resourceKey == null) {
+                LOGGER.debug("Item {} non trovato nello storage virtuale", stack.getItem().getDescriptionId());
+                return false;
+            }
+            
+            // Verifica se l'item è presente e in quantità sufficiente
+            long currentAmount = virtualItems.getOrDefault(resourceKey, 0L);
+            if (currentAmount < amount) {
+                LOGGER.debug("Quantità insufficiente per l'item {}. Richiesto: {}, Disponibile: {}", 
+                    stack.getItem().getDescriptionId(), amount, currentAmount);
+                return false;
+            }
+            
+            // Rimuovi la quantità richiesta o rimuovi completamente l'item
+            long newAmount = currentAmount - amount;
+            if (newAmount <= 0) {
+                virtualItems.remove(resourceKey);
+            } else {
+                virtualItems.put(resourceKey, newAmount);
+            }
+            
+            // Forza un aggiornamento della vista
+            forceStorageUpdate(rsNetwork);
+            
+            LOGGER.debug("Item {} rimosso dalla rete con quantità {}", stack.getItem().getDescriptionId(), amount);
+            return true;
+        } catch (Exception e) {
+            LOGGER.error("Errore durante la rimozione dell'item virtuale: {}", e.getMessage(), e);
+            return false;
+        }
+    }
+    
+    /**
+     * Ottiene la quantità di un item virtuale presente nel network
+     * 
+     * @param stack L'item da verificare
+     * @return La quantità dell'item presente, o 0 se non presente
+     */
+    public long getVirtualItemAmount(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return 0;
+        }
+        
+        try {
+            // Crea un identificatore unico per l'item basato sul suo ResourceLocation
+            String itemId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+            
+            // Cerca il ResourceKey corrispondente
+            for (Map.Entry<ResourceKey, Long> entry : virtualItems.entrySet()) {
+                ResourceKey key = entry.getKey();
+                // Verifica se la chiave contiene il nome dell'item
+                if (key.toString().contains(itemId)) {
+                    return entry.getValue();
+                }
+            }
+            
+            return 0;
+        } catch (Exception e) {
+            LOGGER.error("Errore durante il controllo della quantità dell'item virtuale: {}", e.getMessage(), e);
+            return 0;
+        }
+    }
+    
+    /**
+     * Svuota lo storage virtuale, rimuovendo tutti gli item
+     */
+    public void clearVirtualItems() {
+        virtualItems.clear();
+        LOGGER.debug("Storage virtuale svuotato");
+    }
+
+    /**
+     * Rimuove dalla rete Refined Storage gli item di materia virtuale che non dovrebbero essere presenti
+     * 
+     * @param network La rete RS in cui cercare e rimuovere gli item
+     */
+    public void cleanupVirtualMatterItems(Network network) {
+        if (network == null) {
+            return;
+        }
+
+        try {
+            LOGGER.debug("[CLEANUP] Ricerca e rimozione degli item di materia virtuale non gestiti dalla bridge");
+            
+            // Ottieni il RootStorage dalla rete
+            StorageNetworkComponent component = network.getComponent(StorageNetworkComponent.class);
+            if (!(component instanceof RootStorage rootStorage)) {
+                LOGGER.debug("[CLEANUP] Impossibile accedere al RootStorage");
+                return;
+            }
+            
+            // Usa la reflection per accedere ai metodi necessari
+            // Ottieni tutti gli item presenti nel network
+            try {
+                Method getItemsMethod = rootStorage.getClass().getMethod("getAll");
+                @SuppressWarnings("unchecked")
+                Collection<ResourceAmount> allItems = (Collection<ResourceAmount>) getItemsMethod.invoke(rootStorage);
+                
+                if (allItems == null || allItems.isEmpty()) {
+                    LOGGER.debug("[CLEANUP] Nessun item trovato nella rete");
+                    return;
+                }
+                
+                LOGGER.debug("[CLEANUP] Analisi di {} item nella rete", allItems.size());
+                
+                // Per ogni ResourceAmount, verifica se la ResourceKey rappresenta un item di materia virtuale
+                int itemsDeleted = 0;
+                for (ResourceAmount resourceAmount : allItems) {
+                    ResourceKey resource = resourceAmount.resource();
+                    
+                    // Controlla se l'item corrisponde a un item di materia virtuale
+                    if (isVirtualMatterItem(resource)) {
+                        // Se non è nella nostra lista di item virtuali gestiti, rimuovilo
+                        if (!virtualItems.containsKey(resource)) {
+                            LOGGER.warn("[CLEANUP] Rilevato item di materia virtuale non gestito: {}", resource);
+                            
+                            // Usa il metodo extract di RootStorage per rimuovere l'item
+                            Method extractMethod = rootStorage.getClass().getMethod("extract", ResourceKey.class, long.class, Action.class, Actor.class);
+                            long extracted = (long) extractMethod.invoke(rootStorage, resource, resourceAmount.amount(), Action.EXECUTE, null);
+                            
+                            if (extracted > 0) {
+                                LOGGER.warn("[CLEANUP] Rimosso {} x{} dalla rete", resource, extracted);
+                                itemsDeleted++;
+                            }
+                        }
+                    } else {
+                        // Tenta anche di estrarre l'ItemStack dalla ResourceKey per verificare con ModItems
+                        try {
+                            Method getItemMethod = resource.getClass().getMethod("toItemStack");
+                            Object itemStackObj = getItemMethod.invoke(resource);
+                            
+                            if (itemStackObj instanceof ItemStack stack && ModItems.isVirtualMatterItem(stack)) {
+                                // Rimuovi l'item dalla rete
+                                LOGGER.warn("[CLEANUP] Rilevato item di materia virtuale (via ItemStack): {}", resource);
+                                
+                                Method extractMethod = rootStorage.getClass().getMethod("extract", ResourceKey.class, long.class, Action.class, Actor.class);
+                                long extracted = (long) extractMethod.invoke(rootStorage, resource, resourceAmount.amount(), Action.EXECUTE, null);
+                                
+                                if (extracted > 0) {
+                                    LOGGER.warn("[CLEANUP] Rimosso {} x{} dalla rete", resource, extracted);
+                                    itemsDeleted++;
+                                }
+                            }
+                        } catch (Exception e) {
+                            // Ignora, significa solo che non è stato possibile convertire la ResourceKey in ItemStack
+                        }
+                    }
+                }
+                
+                if (itemsDeleted > 0) {
+                    LOGGER.warn("[CLEANUP] Completato, rimossi {} item di materia virtuale non gestiti", itemsDeleted);
+                } else {
+                    LOGGER.debug("[CLEANUP] Nessun item di materia virtuale non gestito trovato");
+                }
+            } catch (Exception e) {
+                LOGGER.error("[CLEANUP] Errore durante la pulizia degli item: {}", e.getMessage(), e);
+            }
+        } catch (Exception e) {
+            LOGGER.error("[CLEANUP] Errore generale durante la pulizia: {}", e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Verifica se una ResourceKey rappresenta un item di materia virtuale
+     */
+    private boolean isVirtualMatterItem(ResourceKey resource) {
+        if (resource == null) {
+            return false;
+        }
+        
+        try {
+            // Estrai l'identificatore dell'item dalla ResourceKey
+            String resourceStr = resource.toString().toLowerCase();
+            
+            // Verifica se la ResourceKey contiene l'ID del mod e uno dei nomi degli item di materia
+            return resourceStr.contains(RepRSBridge.MOD_ID) && 
+                  (resourceStr.contains("earth") || 
+                   resourceStr.contains("nether") || 
+                   resourceStr.contains("organic") || 
+                   resourceStr.contains("ender") || 
+                   resourceStr.contains("metallic") || 
+                   resourceStr.contains("precious") || 
+                   resourceStr.contains("living") || 
+                   resourceStr.contains("quantum"));
+        } catch (Exception e) {
+            LOGGER.error("Errore durante la verifica dell'item di materia: {}", e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * Metodo serverTick che viene chiamato periodicamente per aggiornare lo stato
+     * Questo metodo si occupa di sincronizzare le quantità di materia tra le reti
+     * 
+     * Il metodo ottiene il MatterNetwork tramite l'entità principale,
+     * legge le quantità di materia usando ReplicationHelper e le rende
+     * visibili nel network Refined Storage come item virtuali.
+     */
+    public void serverTick(Level level, BlockPos pos, BlockState state, RepRSBridgeBlockEntityF blockEntity) {
+        if (level == null || level.isClientSide()) {
+            return;
+        }
+        
+        // Se siamo in fase di salvataggio, salta completamente il tick
+        if (worldSaving || !safeToUpdate) {
+            return;
+        }
+        
+        LOGGER.warn("[TICK] Avvio sincronizzazione RS <-> Replication alla posizione {}", pos);
+        
+        // Sincronizza il MatterNetwork dall'entità principale
+        syncMatterNetwork();
+        
+        // Ottieni il MatterNetwork
+        MatterNetwork matterNetwork = getMatterNetwork();
+        
+        // Verifica se siamo connessi alla rete Refined Storage
+        Network rsNetwork = mainNetworkNode.getNetwork();
+        if (rsNetwork == null) {
+            LOGGER.warn("[TICK] Nessuna connessione alla rete Refined Storage disponibile");
+            return;
+        }
+        
+        LOGGER.warn("[TICK] Connessione alla rete Refined Storage stabilita");
+        
+        // Prima di aggiornare gli item, rimuovi qualsiasi item di materia virtuale non gestito
+        cleanupVirtualMatterItems(rsNetwork);
+        
+        // Pulisci lo storage virtuale prima di iniziare la sincronizzazione
+        clearVirtualItems();
+        
+        // Assicurati che il nostro storage virtuale sia registrato nella rete RS
+        registerVirtualStorage(rsNetwork);
+        
+        if (matterNetwork != null) {
+            LOGGER.warn("[TICK] MatterNetwork trovato, inizio sincronizzazione materia");
+            
+            // Ottieni le quantità di materia dalla rete Replication
+            List<IMatterType> matterTypes = ReplicationHelper.getMatterTypes();
+            
+            // Per ogni tipo di materia, crea un item virtuale
+            for (IMatterType matterType : matterTypes) {
+                long amount = ReplicationHelper.getMatterAmount(matterNetwork, matterType);
+                
+                // Limita la quantità massima per evitare problemi di lag
+                long originalAmount = amount;
+                amount = Math.min(amount, 1000000); // Limita a 1.000.000 di item
+                
+                // Se c'è materia disponibile, aggiungila al network RS
+                if (amount > 0) {
+                    LOGGER.warn("[TICK] Trovata materia {} con quantità {} (limitata da {})", 
+                                matterType.getName(), amount, originalAmount);
+                    
+                    Item matterItem = null;
+                    String matterName = matterType.getName().toLowerCase();
+                    
+                    // Associa il tipo di materia all'item corrispondente
+                    if (matterName.equals("earth")) matterItem = ModItems.EARTH_MATTER.get();
+                    else if (matterName.equals("nether")) matterItem = ModItems.NETHER_MATTER.get();
+                    else if (matterName.equals("organic")) matterItem = ModItems.ORGANIC_MATTER.get();
+                    else if (matterName.equals("ender")) matterItem = ModItems.ENDER_MATTER.get();
+                    else if (matterName.equals("metallic")) matterItem = ModItems.METALLIC_MATTER.get();
+                    else if (matterName.equals("precious")) matterItem = ModItems.PRECIOUS_MATTER.get();
+                    else if (matterName.equals("living")) matterItem = ModItems.LIVING_MATTER.get();
+                    else if (matterName.equals("quantum")) matterItem = ModItems.QUANTUM_MATTER.get();
+                    
+                    if (matterItem != null) {
+                        try {
+                            // Crea un ItemStack con l'item di materia
+                            ItemStack matterStack = new ItemStack(matterItem);
+                            
+                            // Aggiungi l'item alla mappa degli item desiderati
+                            LOGGER.warn("[TICK] Tentativo di aggiungere item virtuale {} con quantità {}", 
+                                       matterItem.getDescriptionId(), amount);
+                            
+                            // Aggiungi l'item virtuale usando il metodo configurato
+                            boolean success = addVirtualItemToNetwork(matterStack, (int)amount);
+                            LOGGER.warn("[TICK] Aggiunta di {} {} con esito {}", 
+                                       amount, matterItem.getDescriptionId(), success ? "SUCCESSO" : "FALLIMENTO");
+                        } catch (Exception e) {
+                            LOGGER.error("Errore durante la creazione dell'item virtuale: {}", e.getMessage(), e);
+                        }
+                    }
+                }
+            }
+            
+            // Applica tutte le modifiche e forza un aggiornamento dello storage
+            virtualStorage.syncFromVirtualItems();
+            forceStorageUpdate(rsNetwork);
+            
+            LOGGER.warn("[TICK] Sincronizzazione materia completata");
+        } else {
+            LOGGER.warn("[TICK] Nessun MatterNetwork trovato, sincronizzazione saltata");
+        }
+        
+        // Logga lo stato degli item virtuali per debug
+        LOGGER.warn("[STORAGE STATO] ==========================================");
+        LOGGER.warn("[STORAGE STATO] Numero item presenti: {}", virtualItems.size());
+        LOGGER.warn("[STORAGE STATO] Quantità totale: {}", virtualStorage.getStored());
+        
+        // Logga ogni elemento dello storage (limita a 10 per evitare spam)
+        int count = 0;
+        for (ResourceAmount amount : virtualStorage.getAll()) {
+            if (count++ < 10) {
+                LOGGER.warn("[STORAGE ITEM] {} x {}", amount.resource(), amount.amount());
+            } else if (count == 11) {
+                LOGGER.warn("[STORAGE ITEM] ... e altri {} item", virtualStorage.getAll().size() - 10);
+                break;
+            }
+        }
+        LOGGER.warn("[STORAGE STATO] ==========================================");
+        
+        LOGGER.warn("[TICK] Fine sincronizzazione RS <-> Replication");
     }
 } 

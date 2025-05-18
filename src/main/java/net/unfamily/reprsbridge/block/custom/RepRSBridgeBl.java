@@ -32,6 +32,8 @@ import net.minecraft.world.item.context.BlockPlaceContext;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.RandomSource;
 import net.minecraft.server.TickTask;
+import java.util.HashMap;
+import java.util.Map;
 
 public class RepRSBridgeBl extends BasicTileBlock<RepRSBridgeBlockEntityP> implements INetworkDirectionalConnection, EntityBlock {
     public static final VoxelShape SHAPE = box(0, 0, 0, 16, 16, 16);
@@ -51,6 +53,16 @@ public class RepRSBridgeBl extends BasicTileBlock<RepRSBridgeBlockEntityP> imple
     public static final BooleanProperty C_WEST = BooleanProperty.create("c_west");
     public static final BooleanProperty C_UP = BooleanProperty.create("c_up");
     public static final BooleanProperty C_DOWN = BooleanProperty.create("c_down");
+
+    // Aggiunta di una mappa statica per tracciare i tentativi di ricostruzione
+    private static final Map<BlockPos, Integer> recreationAttempts = new HashMap<>();
+    private static final int MAX_RECREATION_ATTEMPTS = 3;
+
+    // Entità principali - rese volatile per garantire visibilità in ambienti multithread
+    private volatile RepRSBridgeBlockEntityP replication = null;
+    private volatile RepRSBridgeBlockEntityF refined = null;
+
+    private boolean isUnloading = false;
 
     public RepRSBridgeBl(Properties properties) {
         super(properties, RepRSBridgeBlockEntityP.class);
@@ -220,146 +232,129 @@ public class RepRSBridgeBl extends BasicTileBlock<RepRSBridgeBlockEntityP> imple
     public void neighborChanged(BlockState state, Level worldIn, BlockPos pos, Block blockIn, BlockPos fromPos, boolean isMoving) {
         super.neighborChanged(state, worldIn, pos, blockIn, fromPos, isMoving);
         
-        // Verifica se il mondo è remoto
-        if (worldIn.isClientSide()) {
-            return;
-        }
-        
-        // Crea un nuovo stato basato sulle connessioni attuali
-        BlockState newState = this.createState(worldIn, pos, state);
-        
-        // Se lo stato è cambiato, aggiorna il blocco
-        if (newState != state) {
-            worldIn.setBlockAndUpdate(pos, newState);
-        }
-        
-        // Aggiorna la BlockEntity
-        if (!worldIn.isClientSide() && worldIn.getBlockEntity(pos) instanceof RepRSBridgeBlockEntityP mainEntity) {
-            mainEntity.handleNeighborChanged(fromPos);
-            
-            // Riconnessione dell'entità Refined Storage
-            // Prima ottieni l'attuale entità RS
-            RepRSBridgeBlockEntityF currentRsEntity = mainEntity.getRefinedStorageEntity();
-            
-            // Cancella la vecchia entità RS se esiste
-            if (currentRsEntity != null) {
-                // Aggiungo un delay prima della disconnessione per dare tempo alla rete di stabilizzarsi
-                LOGGER.debug("Attendo prima di riconnettere l'entità Refined Storage alla posizione {}", pos);
-                
-                // Utilizzo un task schedulato invece di una disconnessione immediata
-                if (worldIn instanceof ServerLevel serverLevel) {
-                    serverLevel.getServer().tell(new TickTask(20, () -> {
-                        // Disconnetti dopo il delay
-                        currentRsEntity.disconnectFromNetwork();
-                        
-                        //Ricreo l'entità dopo la disconnessione
-                        RepRSBridgeBlockEntityF newRsEntity = new RepRSBridgeBlockEntityF(pos, state);
-                        
-                        // Collega le due entità
-                        newRsEntity.setMainEntity(mainEntity);
-                        mainEntity.setRefinedStorageEntity(newRsEntity);
-                        
-                        // Registra l'entità RS nel mondo
-                        LOGGER.debug("Ricreo l'entità Refined Storage alla posizione {} dopo il delay", pos);
-                        serverLevel.setBlockEntity(newRsEntity);
-                        
-                        // Forza un aggiornamento del blocco
-                        serverLevel.sendBlockUpdated(pos, state, state, 3);
-                    }));
-                }
-            }
-            
-            // Aggiorna lo stato connected e active
-            boolean isConnected = mainEntity.isActive() && mainEntity.getNetwork() != null;
-            boolean isActive = isConnected;
-            
-            if (newState.getValue(CONNECTED) != isConnected || newState.getValue(ACTIVE) != isActive) {
-                newState = newState
-                    .setValue(CONNECTED, isConnected)
-                    .setValue(ACTIVE, isActive);
-                
+        if (!worldIn.isClientSide()) {
+            // Aggiorna lo stato del blocco
+            BlockState newState = this.createState(worldIn, pos, state);
+            if (newState != state) {
                 worldIn.setBlockAndUpdate(pos, newState);
             }
         }
     }
     
     /**
-     * Implementazione alternativa del pattern multi-BlockEntity
-     * Questo metodo crea esplicitamente la seconda BlockEntity quando necessario
+     * Questo metodo viene chiamato quando il blocco viene posizionato nel mondo
      */
     @Override
     public void onPlace(BlockState state, Level level, BlockPos pos, BlockState oldState, boolean isMoving) {
         super.onPlace(state, level, pos, oldState, isMoving);
         
         if (!level.isClientSide() && !isMoving) {
-            // Ottieni l'entità principale
-            BlockEntity mainEntity = level.getBlockEntity(pos);
-            if (mainEntity instanceof RepRSBridgeBlockEntityP primaryEntity) {
-                // Crea e registra esplicitamente l'entità RS solo quando necessario
-                RepRSBridgeBlockEntityF rsEntity = new RepRSBridgeBlockEntityF(pos, state);
-                
-                // Collega le due entità
-                rsEntity.setMainEntity(primaryEntity);
-                primaryEntity.setRefinedStorageEntity(rsEntity);
-                
-                // Registra l'entità RS nel mondo (aggiungendo un nuovo tipo di BlockEntity nella stessa posizione)
-                LOGGER.debug("Registrazione esplicita della BlockEntity RS alla posizione {}", pos);
-                level.setBlockEntity(rsEntity);
-            }
-            
-            // Aggiorna immediatamente lo stato del blocco
+            // Aggiorna lo stato del blocco
             BlockState newState = this.createState(level, pos, state);
-            
             if (newState != state) {
                 level.setBlockAndUpdate(pos, newState);
             }
             
-            // Schedula un tick per verificare eventuali cambiamenti
+            // Schedula un tick
             level.scheduleTick(pos, this, 5);
         }
     }
     
     /**
+     * Questo metodo è chiamato per ottenere il ticker per la BlockEntity
+     */
+    @Nullable
+    @Override
+    public <T extends BlockEntity> BlockEntityTicker<T> getTicker(Level level, BlockState state, BlockEntityType<T> type) {
+        if (level.isClientSide()) {
+            return null; // Nessun ticker lato client
+        }
+        
+        // Verifica che il tipo corrisponda alla nostra BlockEntity principale
+        if (type == ModBlockEntities.REPRSBRIDGE_P_BE.get()) {
+            return (lvl, pos, blockState, te) -> {
+                if (te instanceof RepRSBridgeBlockEntityP blockEntity) {
+                    blockEntity.serverTick(lvl, pos, blockState, blockEntity);
+                    
+                    // Ottieni l'entità RS ed esegui anche il suo tick se disponibile
+                    RepRSBridgeBlockEntityF rsEntity = blockEntity.getRefinedStorageEntity();
+                    if (rsEntity != null) {
+                        rsEntity.serverTick(lvl, pos, blockState, rsEntity);
+                    }
+                }
+            };
+        }
+        
+        return null;
+    }
+    
+    /**
      * Gestisce i tick schedulati
+     * Questo metodo viene chiamato quando il blocco è schedulato per il tick
      */
     @Override
     public void tick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
+        if (isUnloading) {
+            return;
+        }
         super.tick(state, level, pos, random);
         
-        // Verifica e aggiorna lo stato se necessario
+        // Aggiorna lo stato del blocco
         BlockState newState = this.createState(level, pos, state);
-        
         if (newState != state) {
             level.setBlockAndUpdate(pos, newState);
         }
-
-        // Assicuriamoci che l'entità RS esista e sia connessa
-        BlockEntity mainEntity = level.getBlockEntity(pos);
-        if (mainEntity instanceof RepRSBridgeBlockEntityP primaryEntity) {
-            // Verifica se l'entità RS esiste
-            RepRSBridgeBlockEntityF rsEntity = primaryEntity.getRefinedStorageEntity();
-            
-            if (rsEntity != null) {
-                // Se l'entità esiste, forza un aggiornamento periodicamente
-                rsEntity.setChanged();
+        
+        try {
+            // Gestione per la prima inizializzazione o dopo un reset
+            if (replication == null || refined == null) {
+                // Ottieni le entità direttamente dal mondo
+                BlockEntity mainBlockEntity = level.getBlockEntity(pos);
+                
+                // Se abbiamo un'entità principale, usala per il tick
+                if (mainBlockEntity instanceof RepRSBridgeBlockEntityP mainEntity) {
+                    // Aggiorna il riferimento
+                    replication = mainEntity;
+                    
+                    // Esegui il tick dell'entità principale
+                    mainEntity.serverTick(level, pos, state, mainEntity);
+                    
+                    // Ottieni l'entità RS ed esegui il suo tick se disponibile
+                    RepRSBridgeBlockEntityF rsEntity = mainEntity.getRefinedStorageEntity();
+                    if (rsEntity != null) {
+                        refined = rsEntity;
+                        rsEntity.serverTick(level, pos, state, rsEntity);
+                    }
+                }
+            } else {
+                // Se abbiamo già le entità, esegui i loro tick
+                if (refined != null && !refined.isRemoved()) {
+                    refined.serverTick(level, pos, state, refined);
+                }
+                
+                if (replication != null && !replication.isRemoved()) {
+                    replication.serverTick(level, pos, state, replication);
+                }
             }
-            
-            // Aggiorna lo stato connected e active
-            boolean isConnected = primaryEntity.isActive();
-            
-            if (state.getValue(CONNECTED) != isConnected) {
-                level.setBlockAndUpdate(pos, state.setValue(CONNECTED, isConnected).setValue(ACTIVE, isConnected));
-            }
+        } catch (Exception e) {
+            LOGGER.error("Errore durante il tick: {}", e.getMessage(), e);
         }
         
-        // Schedula un altro tick per verificare periodicamente
-        level.scheduleTick(pos, this, 20);
+        // Rischedula sempre per il prossimo tick (importante per mantenere il blocco "attivo")
+        level.scheduleTick(pos, this, 20); // 20 tick = 1 secondo, puoi regolare in base alle esigenze
     }
     
     @Override
     public void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean moving) {
         // If the block has been removed or replaced
         if (!state.is(newState.getBlock())) {
+            // Pulizia delle riferimenti quando il blocco viene rimosso
+            refined.removeNetwork();
+            replication = null;
+            refined = null;
+            recreationAttempts.remove(pos);
+            LOGGER.debug("Blocco rimosso, riferimenti puliti per la posizione {}", pos);
+            
             // Drop the block itself if not in creative mode
             if (!level.isClientSide) {
                 ItemStack itemStack = new ItemStack(this);
@@ -418,24 +413,44 @@ public class RepRSBridgeBl extends BasicTileBlock<RepRSBridgeBlockEntityP> imple
     }
 
     /**
-     * Questo metodo è chiamato per ottenere il ticker per la BlockEntity
+     * Restituisce il riferimento all'entità principale
      */
     @Nullable
-    @Override
-    public <T extends BlockEntity> BlockEntityTicker<T> getTicker(Level level, BlockState state, BlockEntityType<T> type) {
-        if (level.isClientSide()) {
-            return null;
+    public RepRSBridgeBlockEntityP getReplicationEntity() {
+        return replication;
+    }
+
+    /**
+     * Restituisce il riferimento all'entità Refined Storage
+     */
+    @Nullable
+    public RepRSBridgeBlockEntityF getRefinedStorageEntity() {
+        return refined;
+    }
+
+    /**
+     * Aggiorna i riferimenti alle entità
+     */
+    public void updateEntities(RepRSBridgeBlockEntityP replicationEntity, RepRSBridgeBlockEntityF refinedStorageEntity) {
+        if (replicationEntity != null && (this.replication == null || this.replication.isRemoved() || this.replication != replicationEntity)) {
+            this.replication = replicationEntity;
         }
         
-        // Ticker per l'entità Replication
-        if (type == ModBlockEntities.REPRSBRIDGE_P_BE.get()) {
-            return (lvl, pos, blockState, blockEntity) -> {
-                if (blockEntity instanceof RepRSBridgeBlockEntityP entity) {
-                    entity.serverTick(lvl, pos, blockState, entity);
-                }
-            };
+        if (refinedStorageEntity != null && (this.refined == null || this.refined.isRemoved() || this.refined != refinedStorageEntity)) {
+            this.refined = refinedStorageEntity;
         }
-        
-        return null;
+    }
+
+    /**
+     * Metodo per gestire lo scaricamento del mondo
+     * Resetta i riferimenti alle entità quando il mondo viene scaricato
+     */
+    public void setWorldUnloading(boolean unloading) {
+        if (unloading) {
+            LOGGER.debug("Mondo in scaricamento, reset dei riferimenti alle entità");
+            isUnloading = true;
+            this.replication = null;
+            this.refined = null;
+        }
     }
 }

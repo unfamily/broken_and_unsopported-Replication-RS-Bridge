@@ -4,6 +4,7 @@ import net.unfamily.reprsbridge.block.ModBlocks;
 import net.unfamily.reprsbridge.block.entity.ModBlockEntities;
 import net.unfamily.reprsbridge.block.entity.RepRSBridgeBlockEntityP;
 import net.unfamily.reprsbridge.block.entity.RepRSBridgeBlockEntityF;
+import net.unfamily.reprsbridge.block.custom.RepRSBridgeBl;
 import org.slf4j.Logger;
 
 import com.mojang.logging.LogUtils;
@@ -17,7 +18,6 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.fml.common.Mod;
-//import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.neoforge.common.NeoForge;
@@ -28,6 +28,8 @@ import net.unfamily.reprsbridge.item.ModItems;
 import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
 import com.buuz135.replication.block.MatterPipeBlock;
 
+import net.neoforged.neoforge.event.server.ServerStartingEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
 @Mod(RepRSBridge.MOD_ID)
@@ -65,26 +67,18 @@ public class RepRSBridge
         ModBlockEntities.register(modEventBus);
     }
 
-    private void commonSetup(final FMLCommonSetupEvent event)
-    {
-        // Some common setup code
-        // LOGGER.info("HELLO FROM COMMON SETUP");
-
-        // if (Config.logDirtBlock)
-        //     LOGGER.info("DIRT BLOCK >> {}", BuiltInRegistries.BLOCK.getKey(Blocks.DIRT));
-
-        // LOGGER.info(Config.magicNumberIntroduction + Config.magicNumber);
-
-        // Config.items.forEach((item) -> LOGGER.info("ITEM >> {}", item.toString()));
+    private void commonSetup(final FMLCommonSetupEvent event) {
+        // Registra gli eventi del mod
+        NeoForge.EVENT_BUS.register(this);
+        
+        LOGGER.info("RepRSBridge common setup complete");
 
         // Register the network element factory for the Replication mod
         // This is crucial for making the connection to the Replication network work
         event.enqueueWork(() -> {
             try {
                 // Directly register the factory for DefaultMatterNetworkElement as done by Replication
-                // LOGGER.info("Registering DefaultMatterNetworkElement factory for Replication integration");
                 NetworkElementRegistry.INSTANCE.addFactory(DefaultMatterNetworkElement.ID, new DefaultMatterNetworkElement.Factory());
-                // LOGGER.info("Replication network integration complete");
             } catch (Exception e) {
                 LOGGER.error("Failed to register with Replication network system", e);
             }
@@ -101,9 +95,6 @@ public class RepRSBridge
     private void registerCapabilities(RegisterCapabilitiesEvent event) {
         // Registra le capabilities del bridge per entrambe le entità
         RepRSBridgeCapabilities.register(event);
-
-        // Log that capabilities have been registered
-        // LOGGER.info("RS Bridge capacities registered successfully");
     }
 
     // Add the example block item to the building blocks tab
@@ -112,7 +103,6 @@ public class RepRSBridge
         // Add the bridge to Refined Storage's main creative tab
         if (event.getTabKey().location().toString().equals("refinedstorage:main")) {
             event.accept(ModBlocks.REPRSBRIDGE.get());
-            // LOGGER.info("Added RepRSBridge to RS creative tab");
         }
     }
 
@@ -120,19 +110,19 @@ public class RepRSBridge
     @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event)
     {
-        // LOGGER.info("RepRSBridge: Server starting");
-        RepRSBridgeBlockEntityP.setWorldUnloading(false);
+        //RepRSBridgeBlockEntityP.setWorldUnloading(false);
+        //RepRSBridgeBlockEntityF.setWorldSaving(false);
     }
 
+    /**
+     * Gestisce l'evento di arresto del server
+     * Imposta il flag per evitare aggiornamenti durante l'arresto
+     */
     @SubscribeEvent
-    public void onServerStopping(ServerStoppingEvent event)
-    {
-        LOGGER.info("RepRSBridge: Server stopping, notifying bridges to prepare for unload");
-
-        // Set the static flag in the BlockEntity class
-        RepRSBridgeBlockEntityP.setWorldUnloading(true);
-
-        LOGGER.info("RepRSBridge: All bridges notified of world unload");
+    public void onServerStopping(ServerStoppingEvent event) {
+        //RepRSBridgeBlockEntityF.setWorldSaving(true);
+        //RepRSBridgeBlockEntityP.setWorldUnloading(true);
+        LOGGER.info("RepRSBridge: Server in arresto, disattivati aggiornamenti");
     }
 
     // You can use EventBusSubscriber to automatically register all static methods in the class annotated with @SubscribeEvent
@@ -142,7 +132,7 @@ public class RepRSBridge
         @SubscribeEvent
         public static void onClientSetup(FMLClientSetupEvent event)
         {
-            // LOGGER.info("RepRSBridge: Client setup");
+            // Client setup
         }
     }
 
@@ -169,4 +159,5 @@ public class RepRSBridge
 
         LOGGER.info("Successfully registered with Replication mod");
     }
+
 }

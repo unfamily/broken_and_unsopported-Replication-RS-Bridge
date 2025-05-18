@@ -66,6 +66,31 @@ public class ModItems {
     // Quantum Matter
     public static final DeferredHolder<Item, Item> QUANTUM_MATTER = ITEMS.register("quantum",
             () -> new QuantumMatterItem(new Item.Properties()));
+            
+    /**
+     * Verifica se un item è un item di materia virtuale
+     * @param item L'item da verificare
+     * @return true se l'item è di materia virtuale, false altrimenti
+     */
+    public static boolean isVirtualMatterItem(Item item) {
+        return item == EARTH_MATTER.get() ||
+               item == NETHER_MATTER.get() ||
+               item == ORGANIC_MATTER.get() ||
+               item == ENDER_MATTER.get() ||
+               item == METALLIC_MATTER.get() ||
+               item == PRECIOUS_MATTER.get() ||
+               item == LIVING_MATTER.get() ||
+               item == QUANTUM_MATTER.get();
+    }
+    
+    /**
+     * Verifica se un ItemStack contiene un item di materia virtuale
+     * @param stack L'ItemStack da verificare
+     * @return true se l'ItemStack contiene un item di materia virtuale, false altrimenti
+     */
+    public static boolean isVirtualMatterItem(ItemStack stack) {
+        return !stack.isEmpty() && isVirtualMatterItem(stack.getItem());
+    }
 
     public static void register(IEventBus eventBus) {
         ITEMS.register(eventBus);

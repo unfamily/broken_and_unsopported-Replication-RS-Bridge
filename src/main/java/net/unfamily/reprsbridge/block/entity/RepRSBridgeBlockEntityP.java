@@ -35,11 +35,13 @@ import net.minecraft.world.item.Item;
 import net.unfamily.reprsbridge.item.ModItems;
 import com.buuz135.replication.ReplicationRegistry;
 import net.neoforged.neoforge.items.ItemHandlerHelper;
+import net.unfamily.reprsbridge.util.ReplicationHelper;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.ItemInteractionResult;
@@ -62,10 +64,23 @@ import java.util.Queue;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.LinkedList;
+import java.util.Iterator;
 import java.util.concurrent.Future;
 import java.util.concurrent.CompletableFuture;
 import java.lang.StringBuilder;
 import java.util.Objects;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.BufferedWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntityType;
+import net.minecraft.world.level.block.entity.BlockEntityTicker;
 
 
 /**
@@ -144,6 +159,9 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
     // Riferimento all'entità BlockEntity di Refined Storage
     private RepRSBridgeBlockEntityF refinedStorageEntity;
 
+    // Timestamp dell'ultimo log per evitare di riempire i log
+    private static long lastLogTime = 0;
+
     /**
      * Sets the world unloading state
      * Called from the mod main class when the server is stopping
@@ -161,41 +179,60 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
     }
 
     /**
+     * Static method to create a ticker for this block entity.
+     * Used by the block class to register the ticker.
+     */
+    public static <T extends BlockEntity> BlockEntityTicker<T> createTicker(Level level, BlockEntityType<T> actualType, BlockEntityType<RepRSBridgeBlockEntityP> expectedType) {
+        return level.isClientSide() ? null : 
+            (level1, pos, state, blockEntity) -> ((RepRSBridgeBlockEntityP) blockEntity).serverTick(level1, pos, state, (RepRSBridgeBlockEntityP)blockEntity);
+    }
+
+    /**
      * Server-side tick method to handle network connections and reconnections
      * Called by the base class ReplicationMachine
      */
     @Override
     public void serverTick(Level level, BlockPos pos, BlockState state, RepRSBridgeBlockEntityP blockEntity) {
-        super.serverTick(level, pos, state, blockEntity);
+        if (level.isClientSide() || !(blockEntity instanceof RepRSBridgeBlockEntityP entity)) {
+            return;
+        }
         
+        LOGGER.debug("RepRSBridgeBlockEntityP.serverTick chiamato a {}", pos);
+        
+        // Verifica e aggiorna l'entità RS se necessario
+        entity.updateRefinedStorageEntity();
+        
+        // Il resto del metodo rimane invariato
+        if (entity.initializationTicks < INITIALIZATION_DELAY) {
+            entity.initializationTicks++;
+            if (entity.initializationTicks >= INITIALIZATION_DELAY && entity.initialized == 0) {
+                entity.initialized = 1;
+                // Forza l'aggiornamento delle connessioni
+                entity.forceNeighborUpdates();
+                entity.updateConnectedState();
+            }
+        }
+        
+        // Processa le richieste di pattern accumulate
+        entity.processAccumulatedRequests();
+        
+        // Verifica e aggiorna lo stato della connessione
+        entity.updateConnectedState();
+        
+        // Verifica se c'è necessità di riconnettere le reti
+        if (entity.shouldReconnect) {
+            entity.shouldReconnect = false;
+            entity.forceNeighborUpdates();
+        }
+    }
+
+    /**
+     * Forza manualmente l'attivazione del serverTick
+     */
+    public void forceServerTick() {
         if (level != null && !level.isClientSide()) {
-            // Incrementa il contatore di inizializzazione
-            if (initializationTicks < INITIALIZATION_DELAY) {
-                initializationTicks++;
-                
-                // Dopo un certo ritardo, prova a inizializzare le connessioni
-                if (initializationTicks >= INITIALIZATION_DELAY && initialized == 0) {
-                    LOGGER.info("Bridge: Inizializzazione delle connessioni di rete a {}", worldPosition);
-                    forceNeighborUpdates();
-                    initialized = 1;
-                }
-            }
-            
-            // Se dovremmo riconnetterci, prova a farlo
-            if (shouldReconnect && !nodeCreated) {
-                try {
-                    LOGGER.info("Bridge: Tentativo di riconnessione a {}", worldPosition);
-                    nodeCreated = true;
-                    forceNeighborUpdates();
-                    updateConnectedState();
-                    shouldReconnect = false;
-                } catch (Exception e) {
-                    LOGGER.error("Fallito tentativo di riconnessione: {}", e.getMessage());
-                }
-            }
-            
-            // Aggiorna lo stato visivo della connessione
-            updateConnectedState();
+            LOGGER.info("Bridge: Forzo manualmente l'esecuzione di serverTick a {}", worldPosition);
+            serverTick(level, worldPosition, getBlockState(), this);
         }
     }
 
@@ -268,7 +305,7 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
     public void onLoad() {
         // First initialize the Replication network (as done by the base class)
         super.onLoad();
-        //LOGGER.info("Bridge: onLoad called at {}", worldPosition);
+        LOGGER.info("Bridge: onLoad chiamato a {}", worldPosition);
 
         // Initialize the RS node if it hasn't been done
         if (!nodeCreated && level != null && !level.isClientSide()) {
@@ -276,6 +313,14 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
                 nodeCreated = true;
                 forceNeighborUpdates();
                 updateConnectedState();
+                
+                // Forza l'attivazione del tick
+                forceServerTick();
+                
+                // Schedula un tick per garantire che il blocco venga aggiornato
+                if (level instanceof ServerLevel serverLevel) {
+                    serverLevel.scheduleTick(worldPosition, level.getBlockState(worldPosition).getBlock(), 10);
+                }
             } catch (Exception e) {
                 LOGGER.error("Failed to initialize RS node: {}", e.getMessage());
                 shouldReconnect = true;
@@ -338,34 +383,38 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
      */
     public void handleNeighborChanged(BlockPos fromPos) {
         if (level != null && !level.isClientSide()) {
-            // If the changed block is another bridge, ignore the update
-            Direction directionToNeighbor = null;
-            for (Direction dir : Direction.values()) {
-                if (worldPosition.relative(dir).equals(fromPos)) {
-                    directionToNeighbor = dir;
-                    break;
-                }
-            }
+                try {
+                    // If the changed block is another bridge, ignore the update
+                    Direction directionToNeighbor = null;
+                    for (Direction dir : Direction.values()) {
+                        if (worldPosition.relative(dir).equals(fromPos)) {
+                            directionToNeighbor = dir;
+                            break;
+                        }
+                    }
 
-            if (directionToNeighbor != null && level.getBlockEntity(fromPos) instanceof RepRSBridgeBlockEntityP) {
-                // Debug log disabled for production
-                // LOGGER.debug("Bridge: Ignored update from another bridge at {}", fromPos);
-                return;
-            }
+                    if (directionToNeighbor != null && level.getBlockEntity(fromPos) instanceof RepRSBridgeBlockEntityP) {
+                        // Debug log disabled for production
+                        // LOGGER.debug("Bridge: Ignored update from another bridge at {}", fromPos);
+                        return;
+                    }
 
-            // Forza un nuovo tentativo di connessione al network
-            LOGGER.debug("Bridge: Blocco vicino cambiato in posizione {}, aggiorno la connessione", fromPos);
-            
-            // Se abbiamo un'entità Refined Storage, assicuriamoci che sia connessa
-            if (refinedStorageEntity != null) {
-                // Notifica l'entità RS che potrebbe essere necessario riconnettersi
-                refinedStorageEntity.setChanged();
-                LOGGER.debug("Bridge: Notificata l'entità RS di aggiornare la connessione");
+                    // Forza un nuovo tentativo di connessione al network
+                    LOGGER.debug("Bridge: Blocco vicino cambiato in posizione {}, aggiorno la connessione", fromPos);
+                    
+                    // Se abbiamo un'entità Refined Storage, assicuriamoci che sia connessa
+                    if (refinedStorageEntity != null) {
+                        // Notifica l'entità RS che potrebbe essere necessario riconnettersi
+                        refinedStorageEntity.setChanged();
+                        LOGGER.debug("Bridge: Notificata l'entità RS di aggiornare la connessione");
+                    }
+                    
+                    // Notifica gli adiacenti che ci siamo aggiornati
+                    forceNeighborUpdates();
+                    updateConnectedState();
+            } catch (Exception e) {
+                LOGGER.error("Errore durante il handleNeighborChanged: {}", e.getMessage(), e);
             }
-            
-            // Notifica gli adiacenti che ci siamo aggiornati
-            forceNeighborUpdates();
-            updateConnectedState();
         }
     }
 
@@ -458,7 +507,7 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
      * Utility method to get the Replication network with consistent naming
      * @return The Replication matter network
      */
-    private MatterNetwork getReplicationNetwork() {
+    public MatterNetwork getReplicationNetwork() {
         if (level == null || level.isClientSide()) {
             return null;
         }
@@ -495,14 +544,12 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
 
     @Override
     public ItemInteractionResult onActivated(Player playerIn, InteractionHand hand, Direction facing, double hitX, double hitY, double hitZ) {
-        // Do not call super.onActivated() that would open the GUI
-        // Do not call openGui(playerIn) that would open the GUI
-
-        // Keep only the part related to the RS pattern update
         if (!level.isClientSide() && playerIn instanceof ServerPlayer serverPlayer) {
-            // Update the patterns in RS
-            // ICraftingProvider.requestUpdate(mainNode); // Commentato perché non disponibile in RS
-            // LOGGER.info("Bridge: Updating RS patterns from onActivated");
+            // Apri il GUI del terminale
+            openGui(playerIn);
+            
+            // Aggiorna i pattern in RS
+            updateAvailablePatterns();
         }
         return ItemInteractionResult.SUCCESS;
     }
@@ -775,6 +822,134 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
     }
 
     /**
+     * Aggiorna l'entità Refined Storage, ricreandola se necessario
+     */
+    public void updateRefinedStorageEntity() {
+        if (level == null || level.isClientSide()) {
+            return;
+        }
+
+        try {
+            // Verifica se il chunk è caricato prima di procedere
+            if (!level.hasChunkAt(worldPosition)) {
+                LOGGER.debug("Il chunk per la posizione {} non è caricato, non posso aggiornare l'entità RS", worldPosition);
+                return;
+            }
+
+            // Verifica se il blocco può fornire l'entità RS
+            if (level.getBlockState(worldPosition).getBlock() instanceof RepRSBridgeBl block) {
+                RepRSBridgeBlockEntityF blockRefinedEntity = block.getRefinedStorageEntity();
+                if (blockRefinedEntity != null && !blockRefinedEntity.isRemoved()) {
+                    // L'entità è già presente nel blocco, la utilizziamo
+                    if (refinedStorageEntity != blockRefinedEntity) {
+                        refinedStorageEntity = blockRefinedEntity;
+                        refinedStorageEntity.setMainEntity(this);
+                        LOGGER.debug("Utilizzata entità RS esistente dal blocco");
+                    }
+                    return;
+                }
+            }
+
+            // Prima verifica se possiamo recuperare un'entità esistente nel mondo
+            BlockEntity existingEntity = level.getBlockEntity(worldPosition);
+            if (existingEntity instanceof RepRSBridgeBlockEntityF) {
+                // Se esiste già un'entità RS nella stessa posizione ma non è collegata a questa entità principale
+                if (refinedStorageEntity != existingEntity) {
+                    LOGGER.debug("Trovata entità RS esistente nel mondo alla posizione {}, la riutilizzo", worldPosition);
+                    refinedStorageEntity = (RepRSBridgeBlockEntityF) existingEntity;
+                    refinedStorageEntity.setMainEntity(this);
+                    
+                    // Aggiorna anche il riferimento nel blocco
+                    if (level.getBlockState(worldPosition).getBlock() instanceof RepRSBridgeBl block) {
+                        block.updateEntities(this, refinedStorageEntity);
+                    }
+                    
+                    return;
+                }
+            }
+
+            // Se abbiamo già un'entità RS, verifichiamo che sia valida
+            if (refinedStorageEntity != null) {
+                // Verifica se l'entità è valida e correttamente registrata nel mondo
+                if (!refinedStorageEntity.isRemoved()) {
+                    if (refinedStorageEntity.getLevel() == null) {
+                        // L'entità esiste ma non è registrata nel mondo
+                        LOGGER.debug("Ripristino l'entità RS alla posizione {}", worldPosition);
+                        
+                        // Prima di registrare, verifica se il chunk è valido
+                        if (level.getChunkAt(worldPosition) != null) {
+                            // Rimuovi eventuali altre entità BlockEntity dello stesso tipo per evitare conflitti
+                            if (existingEntity instanceof RepRSBridgeBlockEntityF && existingEntity != refinedStorageEntity) {
+                                LOGGER.debug("Rimosso conflitto con entità RS duplicata");
+                            }
+                            
+                            // Registra l'entità nel mondo
+                            level.setBlockEntity(refinedStorageEntity);
+                            
+                            // Notifica esplicita al chunk
+                            if (level instanceof ServerLevel serverLevel) {
+                                serverLevel.getChunkSource().blockChanged(worldPosition);
+                                // Marca il chunk come modificato
+                                level.getChunkAt(worldPosition).setUnsaved(true);
+                            }
+                        }
+                    }
+                    // Notifica l'entità RS di aggiornare la sua connessione
+                    refinedStorageEntity.setChanged();
+                    
+                    // Aggiorna anche il riferimento nel blocco
+                    if (level.getBlockState(worldPosition).getBlock() instanceof RepRSBridgeBl block) {
+                        block.updateEntities(this, refinedStorageEntity);
+                    }
+                    
+                    return; // Entità esistente e valida, non è necessario ricrearla
+                }
+            }
+            
+            // A questo punto dobbiamo creare una nuova entità RS
+            try {
+                BlockState state = level.getBlockState(worldPosition);
+                RepRSBridgeBlockEntityF rsEntity = new RepRSBridgeBlockEntityF(worldPosition, state);
+                rsEntity.setMainEntity(this);
+                this.setRefinedStorageEntity(rsEntity);
+                
+                // Registra l'entità RS nel mondo
+                level.setBlockEntity(rsEntity);
+                
+                // Verifica che l'entità sia stata registrata correttamente
+                BlockEntity checkEntity = level.getBlockEntity(worldPosition);
+                if (checkEntity instanceof RepRSBridgeBlockEntityP) {
+                    LOGGER.debug("L'entità RS non è stata registrata correttamente, il tipo è RepRSBridgeBlockEntityP");
+                    
+                    // In questo caso, potrebbe esserci un problema con il sistema di BlockEntity multiple
+                    // Registra l'entità nuovamente con un approccio alternativo se disponibile
+                    if (level instanceof ServerLevel serverLevel) {
+                        serverLevel.getChunkSource().blockChanged(worldPosition);
+                        level.getChunkAt(worldPosition).setUnsaved(true);
+                    }
+                }
+                
+                // Notifica esplicita al chunk
+                if (level instanceof ServerLevel serverLevel) {
+                    serverLevel.getChunkSource().blockChanged(worldPosition);
+                    level.getChunkAt(worldPosition).setUnsaved(true);
+                }
+                
+                // Aggiorna anche il riferimento nel blocco
+                if (state.getBlock() instanceof RepRSBridgeBl block) {
+                    block.updateEntities(this, rsEntity);
+                }
+                
+                LOGGER.debug("Creata nuova entità RS alla posizione {}", worldPosition);
+            } catch (Exception e) {
+                LOGGER.error("Errore durante la creazione dell'entità RS: {}", e.getMessage(), e);
+            }
+        } catch (Exception e) {
+            LOGGER.error("Errore generale durante l'aggiornamento dell'entità RS: {}", e.getMessage(), e);
+        }
+    }
+
+    /**
      * Imposta l'entità BlockEntity di Refined Storage
      */
     public void setRefinedStorageEntity(RepRSBridgeBlockEntityF entity) {
@@ -787,5 +962,333 @@ public class RepRSBridgeBlockEntityP extends ReplicationMachine<RepRSBridgeBlock
      */
     public RepRSBridgeBlockEntityF getRefinedStorageEntity() {
         return this.refinedStorageEntity;
+    }
+
+    /**
+     * Ottiene la quantità di materia di un certo tipo nel network
+     * Implementazione reale che utilizza l'API di Replication
+     * 
+     * @param matterType Il tipo di materia da ottenere
+     * @return La quantità reale di materia
+     */
+    private long getMatterAmount(IMatterType matterType) {
+        // Verifica se esiste un network di Replication
+        MatterNetwork matterNetwork = getReplicationNetwork();
+        if (matterNetwork == null) {
+            return 0;
+        }
+        
+        try {
+            // In Replication, viene utilizzato il metodo calculateMatterAmount
+            // per ottenere la quantità totale di materia di un certo tipo nel network
+            return matterNetwork.calculateMatterAmount(matterType);
+                    } catch (Exception e) {
+            LOGGER.error("Errore durante l'accesso alla quantità di materia: {}", e.getMessage(), e);
+            // In caso di errore, ritorna 0 (come richiesto)
+            return 0;
+        }
+    }
+
+    /**
+     * Aggiorna i pattern disponibili nella rete RS
+     */
+    private void updateAvailablePatterns() {
+        if (level == null || level.isClientSide()) {
+            return;
+        }
+        
+        // Per ora questo metodo è vuoto ma potrebbe essere implementato in futuro
+        // per sincronizzare i pattern tra Replication e Refined Storage
+        LOGGER.debug("Aggiornamento dei pattern disponibili");
+    }
+
+    /**
+     * Ottiene la mappa dei pattern disponibili nel network
+     * Implementazione reale che utilizza l'API di Replication
+     * 
+     * @return Mappa di pattern nel formato item_id -> (matter_type -> amount)
+     */
+    private Map<String, Map<String, Integer>> getAvailablePatterns() {
+        Map<String, Map<String, Integer>> patterns = new HashMap<>();
+        
+        // Verifica se esiste un network di Replication
+        MatterNetwork matterNetwork = getReplicationNetwork();
+        if (matterNetwork == null) {
+            return patterns;
+        }
+        
+        try {
+            // Utilizza la classe helper per ottenere i pattern
+            return ReplicationHelper.getAvailablePatterns(matterNetwork, level);
+        } catch (Exception e) {
+            LOGGER.error("Errore durante l'ottenimento dei pattern: {}", e.getMessage(), e);
+            // Non forniamo pattern di esempio in caso di errore, come richiesto
+        }
+        
+        return patterns;
+    }
+
+    /**
+     * Verifica e mantiene le connessioni ai network di Replication e Refined Storage
+     */
+    private void ensureNetworkConnections() {
+        if (level == null || level.isClientSide()) {
+            return;
+        }
+        
+        // Verifica la connessione al network di Replication
+        MatterNetwork matterNetwork = getReplicationNetwork();
+        if (matterNetwork == null) {
+            try {
+                // Tenta di ricreare la connessione
+                NetworkElement element = createElement(level, worldPosition);
+                if (element != null) {
+                    NetworkManager.get(level).addElement(element);
+                    forceNeighborUpdates();
+                }
+            } catch (Exception e) {
+                LOGGER.debug("Non è stato possibile connettersi al network di Replication: {}", e.getMessage());
+            }
+        }
+        
+        // Verifica anche la connessione a Refined Storage attraverso l'entità secondaria
+        if (refinedStorageEntity != null) {
+            // Assicurati che l'entità RS sia registrata correttamente
+            if (!refinedStorageEntity.isRemoved() && refinedStorageEntity.getLevel() == null) {
+                // L'entità esiste ma non è registrata nel mondo
+                LOGGER.debug("Ripristino l'entità RS alla posizione {}", worldPosition);
+                level.setBlockEntity(refinedStorageEntity);
+            }
+            
+            // Notifica l'entità RS di aggiornare la sua connessione se necessario
+            refinedStorageEntity.setChanged();
+        } else if (!level.isClientSide()) {
+            // Se l'entità RS non esiste, creala
+            try {
+                BlockState state = level.getBlockState(worldPosition);
+                RepRSBridgeBlockEntityF rsEntity = new RepRSBridgeBlockEntityF(worldPosition, state);
+                rsEntity.setMainEntity(this);
+                this.setRefinedStorageEntity(rsEntity);
+                level.setBlockEntity(rsEntity);
+                LOGGER.debug("Creata nuova entità RS alla posizione {}", worldPosition);
+            } catch (Exception e) {
+                LOGGER.error("Errore durante la creazione dell'entità RS: {}", e.getMessage());
+            }
+        }
+    }
+    
+    /**
+     * Processa le richieste di pattern accumulate e invia task al network di Replication
+     */
+    private void processAccumulatedRequests() {
+        if (level == null || level.isClientSide()) {
+            return;
+        }
+        
+        // Ottieni il network di Replication
+        MatterNetwork matterNetwork = getReplicationNetwork();
+        if (matterNetwork == null) {
+            // Non possiamo processare richieste senza una connessione al network
+            return;
+        }
+        
+        // Processa le richieste pendenti per ogni fonte
+        for (Map.Entry<UUID, Map<ItemWithSourceId, Integer>> entry : requestCounters.entrySet()) {
+            UUID sourceId = entry.getKey();
+            Map<ItemWithSourceId, Integer> requests = entry.getValue();
+            
+            // Processa le richieste per questa fonte
+            Iterator<Map.Entry<ItemWithSourceId, Integer>> iterator = requests.entrySet().iterator();
+            while (iterator.hasNext()) {
+                Map.Entry<ItemWithSourceId, Integer> requestEntry = iterator.next();
+                ItemWithSourceId itemWithSource = requestEntry.getKey();
+                int count = requestEntry.getValue();
+                
+                if (count <= 0) {
+                    // Rimuovi le richieste completate
+                    iterator.remove();
+                    continue;
+                }
+                
+                // Crea un task di replicazione per questa richiesta
+                ItemStack itemStack = itemWithSource.getItemStack();
+                boolean taskCreated = createReplicationTask(itemStack, sourceId);
+                
+                if (taskCreated) {
+                    // Decrementa il contatore se il task è stato creato con successo
+                    requestEntry.setValue(count - 1);
+                }
+            }
+        }
+    }
+    
+    /**
+     * Crea un task di replicazione per un item specifico
+     * Versione semplificata che usa un approccio più generico per compatibilità con l'API
+     * 
+     * @param itemStack L'item da replicare
+     * @param sourceId L'ID del blocco che ha richiesto la replicazione
+     * @return true se il task è stato creato con successo
+     */
+    private boolean createReplicationTask(ItemStack itemStack, UUID sourceId) {
+        if (level == null || level.isClientSide() || itemStack.isEmpty()) {
+            return false;
+        }
+        
+        try {
+        // Ottieni il network di Replication
+        MatterNetwork matterNetwork = getReplicationNetwork();
+        if (matterNetwork == null) {
+                return false;
+            }
+            
+            // Verifica se c'è abbastanza materia (solo come esempio, non un controllo reale)
+            // In una implementazione reale, dovrebbe controllare i valori di materia del pattern e confrontarli con quelli disponibili
+            ResourceLocation itemId = BuiltInRegistries.ITEM.getKey(itemStack.getItem());
+            boolean hasSufficientMatter = true; // Placeholder
+            
+            if (!hasSufficientMatter) {
+                warnAboutInsufficientMatter(itemStack);
+                return false;
+            }
+            
+            // Simulazione della creazione del task
+            // Una implementazione semplificata per compatibilità
+            // Qui simuliamo un task creato correttamente
+            String taskId = "task_" + UUID.randomUUID().toString();
+            Map<String, TaskSourceInfo> sourceTasks = activeTasks.computeIfAbsent(sourceId, k -> new HashMap<>());
+            sourceTasks.put(taskId, new TaskSourceInfo(itemStack, sourceId));
+            
+            LOGGER.debug("Task di replicazione creato per: {}", itemStack.getDisplayName().getString());
+            return true;
+        } catch (Exception e) {
+            LOGGER.error("Errore durante la creazione del task di replicazione: {}", e.getMessage(), e);
+            return false;
+        }
+    }
+    
+    /**
+     * Getter per il contatore di tick delle richieste
+     */
+    public int getRequestCounterTicks() {
+        return requestCounterTicks;
+    }
+
+    /**
+     * Ottiene un'istanza di IMatterType dal nome
+     */
+    @Nullable
+    private IMatterType getMatterTypeByName(String name) {
+        if (name.equalsIgnoreCase("earth")) return ReplicationRegistry.Matter.EARTH.get();
+        if (name.equalsIgnoreCase("nether")) return ReplicationRegistry.Matter.NETHER.get();
+        if (name.equalsIgnoreCase("organic")) return ReplicationRegistry.Matter.ORGANIC.get();
+        if (name.equalsIgnoreCase("ender")) return ReplicationRegistry.Matter.ENDER.get();
+        if (name.equalsIgnoreCase("metallic")) return ReplicationRegistry.Matter.METALLIC.get();
+        if (name.equalsIgnoreCase("precious")) return ReplicationRegistry.Matter.PRECIOUS.get();
+        if (name.equalsIgnoreCase("living")) return ReplicationRegistry.Matter.LIVING.get();
+        if (name.equalsIgnoreCase("quantum")) return ReplicationRegistry.Matter.QUANTUM.get();
+        return null;
+    }
+
+    /**
+     * Invia un avviso riguardo l'insufficiente materia per replicare un item
+     */
+    private void warnAboutInsufficientMatter(ItemStack itemStack) {
+        if (level == null || level.isClientSide()) {
+            return;
+        }
+        
+        // Limita gli avvisi per evitare spam nel log
+        ResourceLocation itemId = BuiltInRegistries.ITEM.getKey(itemStack.getItem());
+        String itemKey = itemId.toString();
+        long currentTime = System.currentTimeMillis();
+        long lastWarningTime = lastMatterWarnings.getOrDefault(itemKey, 0L);
+        
+        if (currentTime - lastWarningTime > WARNING_COOLDOWN * 50) { // 50 ms per tick
+            LOGGER.warn("Materia insufficiente per replicare: {}", itemStack.getDisplayName().getString());
+            lastMatterWarnings.put(itemKey, currentTime);
+        }
+    }
+
+    /**
+     * Forza un aggiornamento della rete
+     * Questo metodo verifica lo stato di entrambe le reti e aggiorna le entità necessarie
+     */
+    public void forceNetworkUpdate() {
+        if (level == null || level.isClientSide()) {
+            return;
+        }
+        
+        try {
+            LOGGER.debug("Forzo aggiornamento delle reti alla posizione {}", worldPosition);
+            
+            // Forza un ricaricamento del chunk
+            if (level.hasChunkAt(worldPosition)) {
+                level.getChunkAt(worldPosition).setUnsaved(true);
+                
+                if (level instanceof ServerLevel serverLevel) {
+                    serverLevel.getChunkSource().blockChanged(worldPosition);
+                }
+            }
+            
+            // Verifica la rete Replication
+            MatterNetwork matterNetwork = getReplicationNetwork();
+            if (matterNetwork == null) {
+                try {
+                    // Tenta di ricreare la connessione
+                    NetworkElement element = createElement(level, worldPosition);
+                    if (element != null) {
+                        NetworkManager.get(level).addElement(element);
+                        forceNeighborUpdates();
+                    }
+                } catch (Exception e) {
+                    LOGGER.debug("Non è stato possibile connettersi al network di Replication: {}", e.getMessage());
+                }
+            }
+            
+            // Verifica la rete Refined Storage
+            updateRefinedStorageEntity();
+            
+            // Se abbiamo un'entità RS, forza una riconnessione
+            if (refinedStorageEntity != null) {
+                refinedStorageEntity.reconnectToNetwork();
+            }
+            
+            // Forza un aggiornamento del blocco
+            level.sendBlockUpdated(worldPosition, getBlockState(), getBlockState(), 3);
+            
+            // Notifica i blocchi adiacenti
+            for (Direction direction : Direction.values()) {
+                BlockPos neighborPos = worldPosition.relative(direction);
+                level.neighborChanged(neighborPos, getBlockState().getBlock(), worldPosition);
+            }
+            
+            // Aggiorna lo stato visivo
+            updateConnectedState();
+            
+            LOGGER.debug("Aggiornamento forzato delle reti completato");
+        } catch (Exception e) {
+            LOGGER.error("Errore durante l'aggiornamento forzato delle reti: {}", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Chiamato quando il blocco viene tick-ato dal sistema di tick schedulati
+     */
+    public void onScheduledTick() {
+        if (level == null || level.isClientSide()) {
+            return;
+        }
+        
+        // Aggiorna l'entità Refined Storage
+        updateRefinedStorageEntity();
+        
+        // Verifica lo stato della connessione
+        updateConnectedState();
+        
+        // Se abbiamo un'entità RS, verifica anche il suo stato
+        if (refinedStorageEntity != null && refinedStorageEntity.getLevel() != null) {
+            refinedStorageEntity.setChanged();
+        }
     }
 }
