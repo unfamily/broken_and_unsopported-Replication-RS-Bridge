@@ -200,6 +200,11 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
         worldSaving = saving;
         safeToUpdate = !saving;
         LOGGER.info("Bridge RS: Impostato stato di salvataggio del mondo a {}", saving);
+        
+        // Reset the connection flags when world is no longer saving
+        if (!saving) {
+            LOGGER.info("Bridge RS: Ripristino stato connessioni dopo salvataggio");
+        }
     }
     
     /**
@@ -216,19 +221,37 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
                 // Verifica se siamo effettivamente connessi
                 Network network = mainNetworkNode.getNetwork();
                 if (network != null) {
-                    // Rimuovi lo storage virtuale dalla rete prima della disconnessione
-                    if (network.getComponent(StorageNetworkComponent.class) instanceof RootStorage rootStorage) {
-                        if (rootStorage.hasSource(s -> s == virtualStorage)) {
-                            rootStorage.removeSource(virtualStorage);
-                            LOGGER.debug("Storage virtuale rimosso dalla rete RS");
+                    try {
+                        // Rimuovi lo storage virtuale dalla rete prima della disconnessione
+                        if (network.getComponent(StorageNetworkComponent.class) instanceof RootStorage rootStorage) {
+                            if (rootStorage.hasSource(s -> s == virtualStorage)) {
+                                try {
+                                    rootStorage.removeSource(virtualStorage);
+                                    LOGGER.debug("Storage virtuale rimosso dalla rete RS");
+                                } catch (Exception e) {
+                                    LOGGER.debug("Errore rimuovendo lo storage virtuale: {}", e.getMessage());
+                                }
+                            }
                         }
+                        
+                        // Ferma il thread di monitoraggio, se esiste
+                        if (monitorThread != null && monitorThread.isAlive()) {
+                            monitorThread.interrupt();
+                            LOGGER.debug("Thread di monitoraggio interrotto");
+                        }
+                    } catch (Exception e) {
+                        LOGGER.debug("Errore durante la pulizia degli storage: {}", e.getMessage());
                     }
                     
-                    // Forza l'aggiornamento della rete
-                    // Questo è importante per garantire che la rete non mantenga riferimenti invalidi
-                    if (network.getComponent(GraphNetworkComponent.class) != null) {
-                        mainNetworkNode.setNetwork(null);
-                        LOGGER.debug("Rimosso riferimento alla rete dal nodo principale");
+                    try {
+                        // Forza l'aggiornamento della rete
+                        // Questo è importante per garantire che la rete non mantenga riferimenti invalidi
+                        if (network.getComponent(GraphNetworkComponent.class) != null) {
+                            mainNetworkNode.setNetwork(null);
+                            LOGGER.debug("Rimosso riferimento alla rete dal nodo principale");
+                        }
+                    } catch (Exception e) {
+                        LOGGER.debug("Errore durante il reset del network: {}", e.getMessage());
                     }
                 }
                 
@@ -238,8 +261,12 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
                 
                 // Notifica l'entità principale
                 if (mainEntity != null) {
-                    mainEntity.onRefinedStorageNetworkChanged(false, null);
-                    LOGGER.debug("Entità principale notificata della disconnessione");
+                    try {
+                        mainEntity.onRefinedStorageNetworkChanged(false, null);
+                        LOGGER.debug("Entità principale notificata della disconnessione");
+                    } catch (Exception e) {
+                        LOGGER.debug("Errore notificando l'entità principale: {}", e.getMessage());
+                    }
                 }
                 
                 // Marca come modificato per assicurarsi che il mondo salvi il cambiamento
@@ -287,6 +314,40 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
                 return;
             }
             
+            // Ripristina lo stato dello storage virtuale dalla memoria statica
+            if (savedVirtualItems.containsKey(worldPosition)) {
+                virtualItems.clear();
+                virtualItems.putAll(savedVirtualItems.get(worldPosition));
+                LOGGER.debug("Ripristinati {} item virtuali dalla memoria statica", virtualItems.size());
+                // Rimuovi dalla cache dopo il ripristino per evitare ripristini multipli
+                // savedVirtualItems.remove(worldPosition);
+            }
+            
+            // Imposta il flag di sicurezza prima di iniziare la ricostruzione
+            safeToUpdate = true;
+            
+            // Metodo 1: Forza l'aggiornamento dei blocchi vicini
+            forceNeighborUpdates();
+            LOGGER.debug("Forzato aggiornamento dei blocchi vicini per ricostruire la rete");
+            
+            // Reset del network node è fondamentale
+            if (mainNetworkNode != null) {
+                // Solo se non abbiamo già una rete
+                if (mainNetworkNode.getNetwork() == null) {
+                    try {
+                        // Imposta lo stato a null e poi forza un aggiornamento
+                        mainNetworkNode.setNetwork(null);
+                        
+                        // Forza il mainNetworkNodeContainer ad aggiornare lo stato
+                        setChanged();
+                        
+                        LOGGER.debug("Reset e aggiornamento forzato del nodo di rete");
+                    } catch (Exception e) {
+                        LOGGER.debug("Errore durante l'aggiornamento del nodo: {}", e.getMessage());
+                    }
+                }
+            }
+            
             // Forza l'aggiornamento dei blocchi adiacenti per attivare la rete
             for (Direction direction : Direction.values()) {
                 BlockPos neighborPos = worldPosition.relative(direction);
@@ -295,6 +356,10 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
                 if (isRefinedStorageCable(level.getBlockState(neighborPos))) {
                     LOGGER.debug("Forzo aggiornamento blocco RS a {}", neighborPos);
                     level.neighborChanged(neighborPos, level.getBlockState(worldPosition).getBlock(), worldPosition);
+                    
+                    // Forza anche un aggiornamento visivo e di stato per il blocco adiacente
+                    level.sendBlockUpdated(neighborPos, level.getBlockState(neighborPos), 
+                                          level.getBlockState(neighborPos), 3);
                 }
             }
             
@@ -306,12 +371,106 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
                 serverLevel.getChunkSource().blockChanged(worldPosition);
             }
             
+            // Sequenza di tentativi di connessione tramite task ritardati
+            if (level instanceof ServerLevel serverLevel) {
+                // Primo task dopo 10 tick (0.5 secondi)
+                serverLevel.getServer().tell(new net.minecraft.server.TickTask(10, () -> {
+                    try {
+                        // Forza un secondo aggiornamento dei blocchi vicini
+                        forceNeighborUpdates();
+                        
+                        // Verifica connessione immediata
+                        Network network = mainNetworkNode.getNetwork();
+                        if (network != null) {
+                            LOGGER.debug("Rete trovata al primo tentativo, attendo per stabilizzare...");
+                            // Non registriamo lo storage subito, ma attendiamo che la rete si stabilizzi
+                        }
+                    } catch (Exception e) {
+                        LOGGER.debug("Errore nel primo task ritardato: {}", e.getMessage());
+                    }
+                }));
+                
+                // Secondo task dopo 20 tick (1 secondo)
+                serverLevel.getServer().tell(new net.minecraft.server.TickTask(20, () -> {
+                    // Verifica se ora siamo connessi
+                    Network network = mainNetworkNode.getNetwork();
+                    if (network != null) {
+                        LOGGER.debug("Rete trovata al secondo tentativo, registrazione storage...");
+                        // Registriamo lo storage con cautela
+                        try {
+                            registerVirtualStorage(network);
+                            setChanged();
+                            LOGGER.debug("Registrazione storage completata");
+                        } catch (Exception e) {
+                            LOGGER.debug("Errore durante la registrazione dello storage: {}", e.getMessage());
+                        }
+                    } else {
+                        LOGGER.debug("Rete non trovata al secondo tentativo, provo ancora...");
+                        forceNeighborUpdates();
+                    }
+                }));
+                
+                // Terzo task dopo 40 tick (2 secondi) - ultima chance
+                serverLevel.getServer().tell(new net.minecraft.server.TickTask(40, () -> {
+                    Network network = mainNetworkNode.getNetwork();
+                    if (network != null) {
+                        LOGGER.debug("Rete trovata al terzo tentativo, registrazione storage...");
+                        try {
+                            registerVirtualStorage(network);
+                            // Forza un aggiornamento dello storage per garantire la visibilità
+                            forceStorageUpdate(network);
+                            setChanged();
+                            LOGGER.debug("Registrazione storage e aggiornamento forzato completati");
+                        } catch (Exception e) {
+                            LOGGER.debug("Errore durante l'aggiornamento finale: {}", e.getMessage());
+                        }
+                    } else {
+                        LOGGER.debug("Rete non trovata nemmeno al terzo tentativo");
+                        // Ultimo tentativo disperato: forza un aggiornamento completo del blocco
+                        try {
+                            // Forza un aggiornamento del blocco stesso
+                            level.sendBlockUpdated(worldPosition, getBlockState(), getBlockState(), 3);
+                        } catch (Exception e) {
+                            LOGGER.debug("Errore durante l'ultimo tentativo: {}", e.getMessage());
+                        }
+                    }
+                }));
+            }
+            
             // Marca come modificato per assicurarsi che il mondo salvi il cambiamento
             setChanged();
             
-            LOGGER.debug("Riconnessione alla rete RS completata");
+            LOGGER.debug("Processo di riconnessione avviato");
         } catch (Exception e) {
             LOGGER.error("Errore durante la riconnessione alla rete: {}", e.getMessage(), e);
+        }
+    }
+
+    // Metodo per forzare l'aggiornamento dei blocchi vicini e ricostruire la rete
+    private void forceNeighborUpdates() {
+        if (level == null || level.isClientSide()) {
+            return;
+        }
+        
+        try {
+            // Notifica tutti i blocchi adiacenti
+            for (Direction direction : Direction.values()) {
+                BlockPos neighborPos = worldPosition.relative(direction);
+                
+                // Notifica il blocco che c'è stato un cambiamento
+                level.neighborChanged(neighborPos, getBlockState().getBlock(), worldPosition);
+                
+                // Forza un aggiornamento visivo
+                level.sendBlockUpdated(neighborPos, level.getBlockState(neighborPos), 
+                                      level.getBlockState(neighborPos), 3);
+            }
+            
+            // Forza un aggiornamento anche sul blocco stesso
+            level.sendBlockUpdated(worldPosition, getBlockState(), getBlockState(), 3);
+            
+            LOGGER.debug("Aggiornamento dei blocchi vicini forzato alla posizione {}", worldPosition);
+        } catch (Exception e) {
+            LOGGER.error("Errore durante l'aggiornamento dei blocchi vicini: {}", e.getMessage());
         }
     }
 
@@ -511,60 +670,93 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
         if (level != null && !level.isClientSide()) {
             LOGGER.debug("Bridge RS: onLoad chiamato alla posizione {}", worldPosition);
             
-            // Sincronizza subito il MatterNetwork dall'entità principale
-            syncMatterNetwork();
-            
-            // Registra immediatamente lo storage virtuale nella rete RS
-            if (mainNetworkNode != null && mainNetworkNode.getNetwork() != null) {
-                registerVirtualStorage(mainNetworkNode.getNetwork());
-                LOGGER.debug("Storage virtuale registrato durante onLoad");
-            }
-            
-            // Continua con l'implementazione esistente
-            // Forza un aggiornamento di tutti i blocchi adiacenti
-            for (Direction direction : Direction.values()) {
-                BlockPos neighborPos = worldPosition.relative(direction);
-                BlockState neighborState = level.getBlockState(neighborPos);
-                
-                // Se il blocco adiacente è un cavo RS, forza un aggiornamento
-                if (isRefinedStorageCable(neighborState)) {
-                    LOGGER.debug("Bridge RS: Forzo aggiornamento blocco RS a {}", neighborPos);
-                    level.neighborChanged(neighborPos, getBlockState().getBlock(), worldPosition);
-                }
-            }
-            
-            // Forza un setChanged per aggiornare lo stato della rete
-            setChanged();
-            
-            // Schedule a delayed update to ensure network merging
+            // Aggiungi un ritardo per dare il tempo al mondo di caricarsi completamente
             if (level instanceof ServerLevel serverLevel) {
+                // Usa tre task ritardati per garantire che la rete sia completamente caricata
+                
+                // Prima verifica dopo 20 tick (1 secondo)
                 serverLevel.getServer().tell(new net.minecraft.server.TickTask(20, () -> {
-                    // Force network recalculation after delay
-                    LOGGER.debug("Bridge RS: Forzo ricalcolo rete dopo delay per {}", worldPosition);
-                    if (mainNetworkNode != null) {
-                        setChanged();
-                        
-                        // Registra di nuovo lo storage virtuale
-                        if (mainNetworkNode.getNetwork() != null) {
-                            registerVirtualStorage(mainNetworkNode.getNetwork());
-                            LOGGER.debug("Storage virtuale registrato dopo delay");
-                            
-                            // Avvia il serverTick dopo la registrazione
-                            serverTick(level, worldPosition, getBlockState(), this);
+                    LOGGER.debug("Bridge RS: Primo tentativo di connessione");
+                    
+                    // Verifica se siamo già connessi (potremmo esserci già a questo punto)
+                    if (mainNetworkNode.getNetwork() != null) {
+                        LOGGER.debug("Bridge RS: Già connesso alla rete, registrazione storage...");
+                        try {
+                            // Se siamo già connessi, registra lo storage
+                            Network network = mainNetworkNode.getNetwork();
+                            if (network != null) {
+                                registerVirtualStorage(network);
+                                LOGGER.debug("Bridge RS: Storage registrato con successo");
+                            }
+                        } catch (Exception e) {
+                            LOGGER.debug("Bridge RS: Errore registrazione storage: {}", e.getMessage());
                         }
+                    } else {
+                        LOGGER.debug("Bridge RS: Nessuna connessione trovata al primo tentativo");
+                        // Forza l'aggiornamento dei blocchi vicini per attivare la rete
+                        forceNeighborUpdates();
                     }
-                    
-                    // Force block update to notify neighbors
-                    level.sendBlockUpdated(worldPosition, getBlockState(), getBlockState(), 3);
-                    
-                    // Notify all adjacent blocks again
-                    for (Direction direction : Direction.values()) {
-                        BlockPos neighborPos = worldPosition.relative(direction);
-                        level.neighborChanged(neighborPos, getBlockState().getBlock(), worldPosition);
+                }));
+                
+                // Seconda verifica dopo 40 tick (2 secondi)
+                serverLevel.getServer().tell(new net.minecraft.server.TickTask(40, () -> {
+                    LOGGER.debug("Bridge RS: Secondo tentativo di connessione");
+                    try {
+                        // Se la rete non è ancora disponibile, forza un aggiornamento
+                        if (mainNetworkNode.getNetwork() == null) {
+                            LOGGER.debug("Bridge RS: Ancora nessuna connessione, forzo riconnessione");
+                            reconnectToNetwork();
+                        } else {
+                            LOGGER.debug("Bridge RS: Verifica connessione stabilita");
+                            // La rete è disponibile, verifica che lo storage sia registrato
+                            Network network = mainNetworkNode.getNetwork();
+                            if (network != null) {
+                                // Controlla se lo storage virtuale è già registrato
+                                boolean storageRegistrato = network.getComponent(StorageNetworkComponent.class) != null &&
+                                                            network.getComponent(StorageNetworkComponent.class) instanceof RootStorage rootStorage &&
+                                                            rootStorage.hasSource(s -> s == virtualStorage);
+                                
+                                if (!storageRegistrato) {
+                                    LOGGER.debug("Bridge RS: Storage non ancora registrato, registro ora");
+                                    registerVirtualStorage(network);
+                                } else {
+                                    LOGGER.debug("Bridge RS: Storage già registrato, tutto a posto");
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        LOGGER.debug("Bridge RS: Errore secondo tentativo: {}", e.getMessage());
                     }
-                    
-                    // Sincronizza di nuovo il MatterNetwork dopo il delay
-                    syncMatterNetwork();
+                }));
+                
+                // Terza verifica dopo 100 tick (5 secondi) per essere sicuri
+                serverLevel.getServer().tell(new net.minecraft.server.TickTask(100, () -> {
+                    try {
+                        if (mainNetworkNode.getNetwork() == null) {
+                            LOGGER.debug("Bridge RS: Nessuna connessione dopo numerosi tentativi, ultimo tentativo");
+                            // Ultimo disperato tentativo di connessione
+                            reconnectToNetwork();
+                        } else {
+                            // Verifica finale che tutto sia a posto
+                            Network network = mainNetworkNode.getNetwork();
+                            if (network != null) {
+                                boolean storageRegistrato = network.getComponent(StorageNetworkComponent.class) != null &&
+                                                            network.getComponent(StorageNetworkComponent.class) instanceof RootStorage rootStorage &&
+                                                            rootStorage.hasSource(s -> s == virtualStorage);
+                                                                
+                                if (!storageRegistrato) {
+                                    LOGGER.debug("Bridge RS: Storage ancora non registrato, ultimo tentativo");
+                                    registerVirtualStorage(network);
+                                    // Forza un aggiornamento
+                                    forceStorageUpdate(network);
+                                } else {
+                                    LOGGER.debug("Bridge RS: Tutto configurato correttamente");
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        LOGGER.debug("Bridge RS: Errore nell'ultimo tentativo: {}", e.getMessage());
+                    }
                 }));
             }
         }
@@ -729,57 +921,65 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
          */
         @Override
         public long extract(ResourceKey resource, long amount, Action action, Actor actor) {
-            if (amount <= 0) {
-                return 0;
-            }
-            
-            // Assicurati che la lista interna sia sincronizzata
-            if (!initialized) {
-                syncFromVirtualItems();
-            }
-            
             try {
-                // Verifica la quantità attuale
-                Method getMethod = resourceList.getClass().getMethod("get", ResourceKey.class);
-                long currentAmount = (long) getMethod.invoke(resourceList, resource);
+                // Blocca l'estrazione se non è sicuro operare
+                if (!safeToUpdate || worldSaving) {
+                    LOGGER.debug("[STORAGE VIRTUALE] Tentativo di estrazione bloccato (worldSaving={}): {}", 
+                              worldSaving, resource);
+                    return 0;
+                }
                 
-                if (currentAmount <= 0) {
-                    // Logging solo se non è una simulazione e se è stata effettivamente richiesta una risorsa specifica
+                if (resource == null || amount <= 0) {
+                    return 0;
+                }
+                
+                // Verifica se l'item esiste nello storage
+                long stored = virtualItems.getOrDefault(resource, 0L);
+                if (stored <= 0) {
+                    // Se non abbiamo la risorsa, logga solo se non è una simulazione
                     if (action == Action.EXECUTE) {
-                        LOGGER.debug("[STORAGE VIRTUALE] Tentativo di estrazione fallito (risorsa non disponibile): {} da {}",
-                            resource, actor != null ? actor.toString() : "sconosciuto");
+                        LOGGER.debug("[STORAGE VIRTUALE] Tentativo di estrazione fallito (risorsa non disponibile): {} da {}", 
+                                  resource, actor);
                     }
                     return 0;
                 }
                 
-                long extracted = Math.min(currentAmount, amount);
+                // Calcola l'ammontare che possiamo effettivamente estrarre
+                long toExtract = Math.min(stored, amount);
                 
-                // Log dettagliato per l'estrazione
+                // Esegui effettivamente solo se non è una simulazione
                 if (action == Action.EXECUTE) {
-                    LOGGER.debug("[STORAGE VIRTUALE] Estrazione: {} x{} da {} (disponibili: {})",
-                        resource, extracted, actor != null ? actor.toString() : "sconosciuto", currentAmount);
-                }
-                
-                if (action == Action.EXECUTE && extracted > 0) {
-                    // Rimuovi dalla lista interna
-                    Method removeMethod = resourceList.getClass().getMethod("remove", ResourceKey.class, long.class);
-                    removeMethod.invoke(resourceList, resource, extracted);
-                    
-                    // Aggiorna anche la mappa virtualItems
-                    long newAmount = virtualItems.getOrDefault(resource, 0L) - extracted;
-                    if (newAmount <= 0) {
-                        virtualItems.remove(resource);
-                    } else {
-                        virtualItems.put(resource, newAmount);
+                    if (actor != null && actor.toString().contains("TaskImpl")) {
+                        // Se l'estrazione viene da un processo di autocrafting, teniamo traccia
+                        LOGGER.debug("[STORAGE VIRTUALE] Estrazione per autocrafting: {} x{}", resource, toExtract);
                     }
                     
-                    LOGGER.debug("[STORAGE VIRTUALE] Item {} estratto con successo, quantità: {}, rimanenti: {}", 
-                        resource, extracted, newAmount);
+                    // Aggiorna lo storage
+                    virtualItems.put(resource, stored - toExtract);
+                    
+                    // Se l'ammontare è ora zero, rimuovi la chiave
+                    if (virtualItems.get(resource) <= 0) {
+                        virtualItems.remove(resource);
+                    }
+                    
+                    // Aggiorna la resource list
+                    virtualStorage.syncFromVirtualItems();
+                    
+                    // Debug log solo per grandi quantità o quando richiesto esplicitamente
+                    if (toExtract > 1000 || LOGGER.isDebugEnabled()) {
+                        LOGGER.debug("[STORAGE VIRTUALE] Estratto: {} x{} (rimanenti: {})", 
+                                  resource, toExtract, stored - toExtract);
+                    }
+                    
+                    // Marca come modificato per salvare lo stato
+                    if (level != null && !level.isClientSide()) {
+                        setChanged();
+                    }
                 }
                 
-                return extracted;
+                return toExtract;
             } catch (Exception e) {
-                LOGGER.error("Errore durante l'estrazione dell'item: {}", e.getMessage(), e);
+                LOGGER.error("[STORAGE VIRTUALE] Errore durante l'estrazione: {}", e.getMessage(), e);
                 return 0;
             }
         }
@@ -862,37 +1062,18 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
                         // Forza un aggiornamento dello storage dopo l'aggiunta
                         forceStorageUpdate(network);
                         
-                        // Registra un intercettore per gli item inseriti nella rete
-                        // Questo è fondamentale per intercettare e rimuovere gli item di materia virtuale
-                        // che vengono aggiunti alla rete in modi diversi (per esempio, tramite importer)
+                        // Prova ad aggiungere un listener per debug ma senza usare reflectio
                         try {
-                            registerRootStorageInterceptor(rootStorage);
-                        } catch (Exception e) {
-                            LOGGER.error("[REGISTRAZIONE] Errore durante la registrazione dell'intercettore: {}", e.getMessage(), e);
-                        }
-                        
-                        // Aggiungi un listener per debug
-                        try {
-                            // Aggiungi un RootStorageListener per diagnostica
-                            Class<?> listenerClass = Class.forName("com.refinedmods.refinedstorage.api.storage.root.RootStorageListener");
-                            Object listener = java.lang.reflect.Proxy.newProxyInstance(
-                                listenerClass.getClassLoader(),
-                                new Class<?>[] { listenerClass },
-                                (proxy, method, args) -> {
-                                    if (method.getName().contains("onChange")) {
-                                        LOGGER.warn("[LISTENER] Cambiamento nella rete RS rilevato");
-                                    }
-                                    // Restituisce un valore di default
-                                    return method.getReturnType().equals(void.class) ? null : 0L;
-                                }
-                            );
+                            // Usa l'API pubblica, se disponibile
+                            Method addListenerMethod = rootStorage.getClass().getMethod("addListener", 
+                                Class.forName("com.refinedmods.refinedstorage.api.storage.root.RootStorageListener"));
                             
-                            // Aggiungi il listener
-                            Method addListenerMethod = rootStorage.getClass().getMethod("addListener", listenerClass);
-                            addListenerMethod.invoke(rootStorage, listener);
-                            LOGGER.warn("[REGISTRAZIONE] Aggiunto listener diagnostico allo storage");
+                            if (addListenerMethod != null) {
+                                LOGGER.warn("[REGISTRAZIONE] Metodo addListener trovato, possibile aggiungere listener");
+                            }
                         } catch (Exception e) {
-                            LOGGER.debug("[REGISTRAZIONE] Impossibile aggiungere listener diagnostico: {}", e.getMessage());
+                            // Ignora l'errore, è solo per debug
+                            LOGGER.debug("[REGISTRAZIONE] Impossibile aggiungere listener: {}", e.getMessage());
                         }
                     } else {
                         LOGGER.warn("[REGISTRAZIONE] Storage virtuale già presente nella rete RS");
@@ -928,61 +1109,44 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
             LOGGER.warn("[INTERCEPTOR] Thread di monitoraggio precedente terminato");
         }
         
-        // Estrattore di item di materia virtuale dalla rete RS
-        // La seguente classe implementa un intercettore che monitora la rete RS
-        // e rimuove automaticamente gli item di materia virtuale inseriti
-        // Il suo funzionamento dipende dall'implementazione interna di RootStorage
+        // Non usiamo più reflection per accedere agli storages interni
+        // Utilizziamo solo l'API pubblica
         
-        try {
-            // Ottieni il metodo di accesso agli storages
-            Method getStoragesMethod = rootStorage.getClass().getDeclaredMethod("getStorages");
-            getStoragesMethod.setAccessible(true);
-            Object storages = getStoragesMethod.invoke(rootStorage);
+        // Inizia un thread di monitoraggio per intercettare e rimuovere gli item
+        monitorThread = new Thread(() -> {
+            LOGGER.warn("[INTERCEPTOR] Thread di monitoraggio avviato");
             
-            if (storages == null) {
-                LOGGER.warn("[INTERCEPTOR] Impossibile accedere agli storages interni");
-                return;
-            }
-            
-            // Inizia un thread di monitoraggio per intercettare e rimuovere gli item
-            monitorThread = new Thread(() -> {
-                LOGGER.warn("[INTERCEPTOR] Thread di monitoraggio avviato");
-                
-                while (level != null && !level.isClientSide() && !isRemoved()) {
-                    try {
-                        // Verifica se siamo connessi alla rete
-                        Network network = mainNetworkNode.getNetwork();
-                        if (network == null) {
-                            // Se la rete non è disponibile, interrompi il monitoraggio
-                            break;
-                        }
-                        
-                        // Pulisci gli item di materia virtuale non gestiti
-                        cleanupVirtualMatterItems(network);
-                        
-                        // Attendi prima del prossimo controllo (ogni 2 secondi)
-                        Thread.sleep(2000);
-                    } catch (InterruptedException e) {
-                        break;
-                    } catch (Exception e) {
-                        LOGGER.error("[INTERCEPTOR] Errore durante il monitoraggio: {}", e.getMessage(), e);
+            while (level != null && !level.isClientSide() && !isRemoved()) {
+                try {
+                    // Verifica se siamo connessi alla rete
+                    Network network = mainNetworkNode.getNetwork();
+                    if (network == null) {
+                        // Se la rete non è disponibile, interrompi il monitoraggio
                         break;
                     }
+                    
+                    // Pulisci gli item di materia virtuale non gestiti
+                    cleanupVirtualMatterItems(network);
+                    
+                    // Attendi prima del prossimo controllo (ogni 2 secondi)
+                    Thread.sleep(2000);
+                } catch (InterruptedException e) {
+                    break;
+                } catch (Exception e) {
+                    LOGGER.error("[INTERCEPTOR] Errore durante il monitoraggio: {}", e.getMessage(), e);
+                    break;
                 }
-                
-                LOGGER.warn("[INTERCEPTOR] Thread di monitoraggio terminato");
-            });
+            }
             
-            // Imposta il thread come daemon per farlo terminare quando il server si spegne
-            monitorThread.setDaemon(true);
-            monitorThread.setName("RS-Bridge-ItemMonitor");
-            monitorThread.start();
-            
-            LOGGER.warn("[INTERCEPTOR] Interceptor installato con successo");
-        } catch (Exception e) {
-            LOGGER.error("[INTERCEPTOR] Errore durante l'installazione dell'interceptor: {}", e.getMessage(), e);
-            throw e;
-        }
+            LOGGER.warn("[INTERCEPTOR] Thread di monitoraggio terminato");
+        });
+        
+        // Imposta il thread come daemon per farlo terminare quando il server si spegne
+        monitorThread.setDaemon(true);
+        monitorThread.setName("RS-Bridge-ItemMonitor");
+        monitorThread.start();
+        
+        LOGGER.warn("[INTERCEPTOR] Interceptor installato con successo");
     }
     
     /**
@@ -1447,97 +1611,152 @@ implements NetworkNodeExtendedMenuProvider<BridgeData>, BlockEntityWithDrops {
         Network rsNetwork = mainNetworkNode.getNetwork();
         if (rsNetwork == null) {
             LOGGER.warn("[TICK] Nessuna connessione alla rete Refined Storage disponibile");
+            
+            // Se non c'è connessione, tenta una riconnessione solo ogni 20 tick (1 secondo)
+            // per evitare di sovraccaricare il sistema con tentativi continui
+            if (level.getGameTime() % 20 == 0) {
+                LOGGER.debug("[TICK] Tentativo periodico di riconnessione alla rete RS");
+                reconnectToNetwork();
+            }
             return;
         }
         
         LOGGER.warn("[TICK] Connessione alla rete Refined Storage stabilita");
         
         // Prima di aggiornare gli item, rimuovi qualsiasi item di materia virtuale non gestito
-        cleanupVirtualMatterItems(rsNetwork);
+        try {
+            cleanupVirtualMatterItems(rsNetwork);
+        } catch (Exception e) {
+            LOGGER.error("[TICK] Errore durante la pulizia degli item virtuali: {}", e.getMessage());
+            // Non interrompere l'esecuzione in caso di errore nella pulizia
+        }
         
-        // Pulisci lo storage virtuale prima di iniziare la sincronizzazione
-        clearVirtualItems();
+        // Verifica che il nostro storage virtuale sia registrato nella rete RS
+        try {
+            boolean storageRegistrato = false;
+            if (rsNetwork.getComponent(StorageNetworkComponent.class) instanceof RootStorage rootStorage) {
+                storageRegistrato = rootStorage.hasSource(s -> s == virtualStorage);
+            }
+            
+            // Se lo storage non è registrato, registralo
+            if (!storageRegistrato) {
+                LOGGER.debug("[TICK] Storage virtuale non registrato, registro ora");
+                registerVirtualStorage(rsNetwork);
+            }
+        } catch (Exception e) {
+            LOGGER.error("[TICK] Errore durante la verifica/registrazione dello storage: {}", e.getMessage());
+        }
         
-        // Assicurati che il nostro storage virtuale sia registrato nella rete RS
-        registerVirtualStorage(rsNetwork);
+        // Prima di aggiungere nuovi item, pulisci lo storage virtuale
+        try {
+            clearVirtualItems();
+        } catch (Exception e) {
+            LOGGER.error("[TICK] Errore durante la pulizia dello storage virtuale: {}", e.getMessage());
+        }
         
         if (matterNetwork != null) {
             LOGGER.warn("[TICK] MatterNetwork trovato, inizio sincronizzazione materia");
             
             // Ottieni le quantità di materia dalla rete Replication
             List<IMatterType> matterTypes = ReplicationHelper.getMatterTypes();
+            int itemsSincronizzati = 0;
             
             // Per ogni tipo di materia, crea un item virtuale
             for (IMatterType matterType : matterTypes) {
-                long amount = ReplicationHelper.getMatterAmount(matterNetwork, matterType);
-                
-                // Limita la quantità massima per evitare problemi di lag
-                long originalAmount = amount;
-                amount = Math.min(amount, 1000000); // Limita a 1.000.000 di item
-                
-                // Se c'è materia disponibile, aggiungila al network RS
-                if (amount > 0) {
-                    LOGGER.warn("[TICK] Trovata materia {} con quantità {} (limitata da {})", 
-                                matterType.getName(), amount, originalAmount);
+                try {
+                    long amount = ReplicationHelper.getMatterAmount(matterNetwork, matterType);
                     
-                    Item matterItem = null;
-                    String matterName = matterType.getName().toLowerCase();
+                    // Limita la quantità massima per evitare problemi di lag
+                    long originalAmount = amount;
+                    amount = Math.min(amount, 1000000); // Limita a 1.000.000 di item
                     
-                    // Associa il tipo di materia all'item corrispondente
-                    if (matterName.equals("earth")) matterItem = ModItems.EARTH_MATTER.get();
-                    else if (matterName.equals("nether")) matterItem = ModItems.NETHER_MATTER.get();
-                    else if (matterName.equals("organic")) matterItem = ModItems.ORGANIC_MATTER.get();
-                    else if (matterName.equals("ender")) matterItem = ModItems.ENDER_MATTER.get();
-                    else if (matterName.equals("metallic")) matterItem = ModItems.METALLIC_MATTER.get();
-                    else if (matterName.equals("precious")) matterItem = ModItems.PRECIOUS_MATTER.get();
-                    else if (matterName.equals("living")) matterItem = ModItems.LIVING_MATTER.get();
-                    else if (matterName.equals("quantum")) matterItem = ModItems.QUANTUM_MATTER.get();
-                    
-                    if (matterItem != null) {
-                        try {
-                            // Crea un ItemStack con l'item di materia
-                            ItemStack matterStack = new ItemStack(matterItem);
-                            
-                            // Aggiungi l'item alla mappa degli item desiderati
-                            LOGGER.warn("[TICK] Tentativo di aggiungere item virtuale {} con quantità {}", 
-                                       matterItem.getDescriptionId(), amount);
-                            
-                            // Aggiungi l'item virtuale usando il metodo configurato
-                            boolean success = addVirtualItemToNetwork(matterStack, (int)amount);
-                            LOGGER.warn("[TICK] Aggiunta di {} {} con esito {}", 
-                                       amount, matterItem.getDescriptionId(), success ? "SUCCESSO" : "FALLIMENTO");
-                        } catch (Exception e) {
-                            LOGGER.error("Errore durante la creazione dell'item virtuale: {}", e.getMessage(), e);
+                    // Se c'è materia disponibile, aggiungila al network RS
+                    if (amount > 0) {
+                        LOGGER.debug("[TICK] Trovata materia {} con quantità {} (limitata da {})", 
+                                    matterType.getName(), amount, originalAmount);
+                        
+                        Item matterItem = null;
+                        String matterName = matterType.getName().toLowerCase();
+                        
+                        // Associa il tipo di materia all'item corrispondente
+                        if (matterName.equals("earth")) matterItem = ModItems.EARTH_MATTER.get();
+                        else if (matterName.equals("nether")) matterItem = ModItems.NETHER_MATTER.get();
+                        else if (matterName.equals("organic")) matterItem = ModItems.ORGANIC_MATTER.get();
+                        else if (matterName.equals("ender")) matterItem = ModItems.ENDER_MATTER.get();
+                        else if (matterName.equals("metallic")) matterItem = ModItems.METALLIC_MATTER.get();
+                        else if (matterName.equals("precious")) matterItem = ModItems.PRECIOUS_MATTER.get();
+                        else if (matterName.equals("living")) matterItem = ModItems.LIVING_MATTER.get();
+                        else if (matterName.equals("quantum")) matterItem = ModItems.QUANTUM_MATTER.get();
+                        
+                        if (matterItem != null) {
+                            try {
+                                // Crea un ItemStack con l'item di materia
+                                ItemStack matterStack = new ItemStack(matterItem);
+                                
+                                // Aggiungi l'item alla mappa degli item virtuali
+                                LOGGER.debug("[TICK] Tentativo di aggiungere item virtuale {} con quantità {}", 
+                                           matterItem.getDescriptionId(), amount);
+                                
+                                // Aggiungi l'item virtuale usando il metodo configurato
+                                boolean success = addVirtualItemToNetwork(matterStack, (int)amount);
+                                if (success) {
+                                    itemsSincronizzati++;
+                                }
+                                LOGGER.debug("[TICK] Aggiunta di {} {} con esito {}", 
+                                           amount, matterItem.getDescriptionId(), success ? "SUCCESSO" : "FALLIMENTO");
+                            } catch (Exception e) {
+                                LOGGER.error("[TICK] Errore durante la creazione dell'item virtuale {}: {}", 
+                                             matterItem.getDescriptionId(), e.getMessage());
+                            }
                         }
                     }
+                } catch (Exception e) {
+                    LOGGER.error("[TICK] Errore processando il tipo di materia {}: {}", 
+                                 matterType.getName(), e.getMessage());
                 }
             }
             
             // Applica tutte le modifiche e forza un aggiornamento dello storage
-            virtualStorage.syncFromVirtualItems();
-            forceStorageUpdate(rsNetwork);
-            
-            LOGGER.warn("[TICK] Sincronizzazione materia completata");
+            try {
+                virtualStorage.syncFromVirtualItems();
+                
+                // Forza un aggiornamento dello storage solo se abbiamo effettivamente sincronizzato degli item
+                if (itemsSincronizzati > 0) {
+                    forceStorageUpdate(rsNetwork);
+                    LOGGER.debug("[TICK] Forzato aggiornamento dello storage dopo sincronizzazione di {} tipi di materia", 
+                              itemsSincronizzati);
+                }
+                
+                LOGGER.warn("[TICK] Sincronizzazione materia completata");
+            } catch (Exception e) {
+                LOGGER.error("[TICK] Errore durante la sincronizzazione finale: {}", e.getMessage());
+            }
         } else {
             LOGGER.warn("[TICK] Nessun MatterNetwork trovato, sincronizzazione saltata");
         }
         
-        // Logga lo stato degli item virtuali per debug
-        LOGGER.warn("[STORAGE STATO] ==========================================");
-        LOGGER.warn("[STORAGE STATO] Numero item presenti: {}", virtualItems.size());
-        LOGGER.warn("[STORAGE STATO] Quantità totale: {}", virtualStorage.getStored());
-        
-        // Logga ogni elemento dello storage (limita a 10 per evitare spam)
-        int count = 0;
-        for (ResourceAmount amount : virtualStorage.getAll()) {
-            if (count++ < 10) {
-                LOGGER.warn("[STORAGE ITEM] {} x {}", amount.resource(), amount.amount());
-            } else if (count == 11) {
-                LOGGER.warn("[STORAGE ITEM] ... e altri {} item", virtualStorage.getAll().size() - 10);
-                break;
+        // Logga lo stato degli item virtuali per debug solo ogni 20 tick (1 secondo)
+        if (level.getGameTime() % 20 == 0) {
+            try {
+                LOGGER.debug("[STORAGE STATO] ==========================================");
+                LOGGER.debug("[STORAGE STATO] Numero item presenti: {}", virtualItems.size());
+                LOGGER.debug("[STORAGE STATO] Quantità totale: {}", virtualStorage.getStored());
+                
+                // Logga ogni elemento dello storage (limita a 10 per evitare spam)
+                int count = 0;
+                for (ResourceAmount amount : virtualStorage.getAll()) {
+                    if (count++ < 10) {
+                        LOGGER.debug("[STORAGE ITEM] {} x {}", amount.resource(), amount.amount());
+                    } else if (count == 11) {
+                        LOGGER.debug("[STORAGE ITEM] ... e altri {} item", virtualStorage.getAll().size() - 10);
+                        break;
+                    }
+                }
+                LOGGER.debug("[STORAGE STATO] ==========================================");
+            } catch (Exception e) {
+                LOGGER.error("[STORAGE STATO] Errore durante il logging dello stato: {}", e.getMessage());
             }
         }
-        LOGGER.warn("[STORAGE STATO] ==========================================");
         
         LOGGER.warn("[TICK] Fine sincronizzazione RS <-> Replication");
     }
